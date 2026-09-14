@@ -139,29 +139,39 @@ const CHECK_INS = [
  * Reconcile rather than create-once: stored schedules survive restarts, so a
  * plain create would silently keep the cron and timezone from whichever boot
  * happened to run first — including the UTC default from before TIMEZONE was set.
+ *
+ * Stored ids carry a fixed `agent_` namespace prefix that is **not** derived from the
+ * agent they target — `agent_morning-brief` can perfectly well run on `nudger`. Matching
+ * on a `<agentId>_<slug>` guess therefore never hits, and every boot would try to create
+ * a schedule that already exists. Match on the slug suffix instead.
  */
-/**
- * The check-ins used to be bound to the main agent. Stored schedules survive restarts,
- * so without this the old ones keep firing alongside the new ones: every check-in twice,
- * and the duplicate still on the expensive model. Delete anything left on `agent`.
- */
+const NUDGER_ID = 'nudger';
+
+const findStored = (schedules: { id: string }[], slug: string) =>
+  schedules.find((schedule) => schedule.id === slug || schedule.id.endsWith(`_${slug}`));
+
+// The check-ins used to run on the main agent. Anything still targeting it would keep
+// firing alongside the new ones — every check-in twice, the duplicate on the pricier
+// model — so retire those before reconciling.
 for (const stale of await mastra.schedules.list({ agentId: 'agent' })) {
   await mastra.schedules.delete(stale.id).catch((error) => {
-    mastra.getLogger().warn('Could not remove a stale schedule', { id: stale.id, error });
+    mastra.getLogger().warn('Could not remove a schedule left on the old agent', {
+      id: stale.id,
+      error,
+    });
   });
 }
 
-const stored = await mastra.schedules.list({ agentId: 'nudger' });
-const byId = new Map(stored.map((schedule) => [schedule.id, schedule]));
+const stored = await mastra.schedules.list({ agentId: NUDGER_ID });
 
 for (const checkIn of CHECK_INS) {
-  const existing = byId.get(checkIn.id) ?? byId.get(`nudger_${checkIn.id}`);
+  const existing = findStored(stored, checkIn.id);
   const desired = { cron: checkIn.cron, timezone, prompt: checkIn.prompt };
 
   if (existing) {
     await mastra.schedules.update(existing.id, desired);
   } else {
-    await mastra.schedules.create({ id: checkIn.id, agentId: 'nudger', ...desired });
+    await mastra.schedules.create({ id: checkIn.id, agentId: NUDGER_ID, ...desired });
   }
 }
 
