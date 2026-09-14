@@ -17,6 +17,13 @@ import { notifyTool } from '../tools/notify-tool';
 const workspacePath = 'workspace';
 const timezone = process.env.TIMEZONE || 'UTC';
 
+/**
+ * Models are overridable from `.env` so a swap needs no code change. The `provider/model`
+ * form is Mastra's routing prefix, so these can point at a non-OpenAI provider too.
+ */
+const agentModel = process.env.AGENT_MODEL || 'openai/gpt-5.6-terra';
+const memoryModel = process.env.MEMORY_MODEL || 'openai/gpt-5-mini';
+
 const workspace = new Workspace({
   id: 'agent-workspace',
   name: 'Agent Workspace',
@@ -94,7 +101,7 @@ Write like a sharp assistant texting a colleague. Short. Concrete. No preamble, 
 Keep Telegram messages to a few lines. This arrives as a phone notification, not a document. Avoid headings and tables; use simple text and short lists.
 
 Ask a question only when the answer changes what you would do. Otherwise pick the sensible default and say what you picked.`,
-  model: 'openai/gpt-5.6-terra',
+  model: agentModel,
   defaultOptions: {
     maxSteps: 100,
     autoResumeSuspendedTools: true,
@@ -125,7 +132,7 @@ Ask a question only when the answer changes what you would do. Otherwise pick th
 `,
       },
       observationalMemory: {
-        model: 'openai/gpt-5-mini',
+        model: memoryModel,
         /**
          * Thread scope (the default) throws when a run has no thread, which is every
          * scheduled check-in — they fire threadless, so the whole reminder path died

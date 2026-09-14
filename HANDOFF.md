@@ -138,6 +138,8 @@ Real credentials are in `.env` (gitignored); `.env.example` documents the shape.
 | `TELEGRAM_ALLOWED_USER_IDS` | comma-separated numeric user IDs — **never leave blank** |
 | `TELEGRAM_OWNER_CHAT_ID` | private chat for scheduled pushes; same number as his user ID |
 | `TIMEZONE` | `Asia/Baghdad` |
+| `AGENT_MODEL` | optional; defaults to `openai/gpt-5.6-terra` |
+| `MEMORY_MODEL` | optional; defaults to `openai/gpt-5-mini` |
 | `TURSO_DATABASE_URL` | absolute `file:` URL to `mastra.db` — **keep absolute** |
 | `GOOGLE_CLIENT_ID` / `_SECRET` / `_REFRESH_TOKEN` | Desktop-app OAuth |
 

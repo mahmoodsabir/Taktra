@@ -42,7 +42,21 @@ TELEGRAM_OWNER_CHAT_ID=123456789
 
 To let other people talk to it, add their IDs to the same list.
 
-## 2. Google Calendar
+## 2. Models
+
+Both models are set in `.env` and are optional — leave them out and the defaults apply.
+
+```bash
+AGENT_MODEL=openai/gpt-5.6-terra
+MEMORY_MODEL=openai/gpt-5-mini
+```
+
+`AGENT_MODEL` does all the reasoning, chat, and tool calls. `MEMORY_MODEL` only does
+background summarizing for observational memory, so a small model is the right choice
+there. The `provider/model` prefix is Mastra's routing, so these can point at a
+non-OpenAI provider — set that provider's API key alongside it.
+
+## 3. Google Calendar
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and
    enable the **Google Calendar API**.
@@ -59,7 +73,7 @@ npm run google:auth
 A refresh token is used rather than a service account because a personal Gmail calendar
 cannot be shared with a service account without a Workspace domain.
 
-## 3. Check-ins
+## 4. Check-ins
 
 Four standing schedules are defined in [`src/mastra/index.ts`](src/mastra/index.ts) and
 reconciled on every boot, so editing the cron there is enough to change them:
@@ -82,7 +96,7 @@ an empty run is the expected outcome most of the time.
 You can also ask the agent in chat for one-off schedules; it has `start_schedule` and
 `stop_schedule` for that.
 
-## 4. Running it for real
+## 5. Running it for real
 
 The agent long-polls Telegram and runs cron in-process, so it needs an always-on host —
 a small VM or container, not a serverless platform. `LocalSandbox` and `LocalFilesystem`
