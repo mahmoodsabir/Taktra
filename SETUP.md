@@ -48,13 +48,18 @@ Both models are set in `.env` and are optional — leave them out and the defaul
 
 ```bash
 AGENT_MODEL=openai/gpt-5.6-terra
-MEMORY_MODEL=openai/gpt-5-mini
+NUDGE_MODEL=openai/gpt-5.6-luna
+MEMORY_MODEL=openai/gpt-5.6-luna
 ```
 
-`AGENT_MODEL` does all the reasoning, chat, and tool calls. `MEMORY_MODEL` only does
-background summarizing for observational memory, so a small model is the right choice
-there. The `provider/model` prefix is Mastra's routing, so these can point at a
-non-OpenAI provider — set that provider's API key alongside it.
+- `AGENT_MODEL` — interactive chat. Multi-step tool calling, where a silently dropped
+  `todo_add` would lose a real commitment, so this one stays on the stronger model.
+- `NUDGE_MODEL` — the scheduled check-ins, which run as a separate `nudger` agent. The
+  work is formulaic and nobody is waiting on the reply.
+- `MEMORY_MODEL` — observational memory and thread titles. Background summarizing.
+
+The `provider/model` prefix is Mastra's routing, so these can point at a non-OpenAI
+provider — set that provider's API key alongside it.
 
 ## 3. Google Calendar
 
@@ -89,6 +94,9 @@ reconciled on every boot, so editing the cron there is enough to change them:
 returns `null` when nothing is due, which skips the fire entirely — no agent run, no
 model call, no cost.
 
+All four run as the `nudger` agent, not the main one — see
+[`docs/adr/0003-separate-nudger-agent.md`](docs/adr/0003-separate-nudger-agent.md).
+
 Each fire is an isolated run with no inbound message, so the agent reaches you through the
 `send_telegram` tool. It is instructed to stay silent when nothing is genuinely due —
 an empty run is the expected outcome most of the time.
@@ -110,6 +118,7 @@ task and memory.
 | Path | Purpose |
 | --- | --- |
 | [`src/mastra/agents/agent.ts`](src/mastra/agents/agent.ts) | Instructions, memory, channel wiring |
+| [`src/mastra/agents/nudger.ts`](src/mastra/agents/nudger.ts) | Scheduled check-ins, on the cheaper model |
 | [`src/mastra/lib/telegram.ts`](src/mastra/lib/telegram.ts) | Adapter, polling loop, owner chat |
 | [`src/mastra/lib/notify.ts`](src/mastra/lib/notify.ts) | Unprompted outbound push |
 | [`src/mastra/lib/todos.ts`](src/mastra/lib/todos.ts) | Task store (SQLite via libSQL) |

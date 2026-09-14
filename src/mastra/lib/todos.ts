@@ -1,14 +1,24 @@
 import { createClient, type Client } from '@libsql/client';
 
-export type TodoStatus = 'open' | 'blocked' | 'done' | 'dropped';
-export type TodoContext = 'personal' | 'work' | 'health' | 'family' | 'growth' | 'admin';
+/**
+ * `blocked` and `stalled` are deliberately separate.
+ *
+ * `blocked` waits on someone else, so chasing the owner achieves nothing and the nudge
+ * should offer to chase the other party instead. `stalled` is stuck on the owner, which
+ * is exactly what this product exists to push on. They earn different cadences, so one
+ * status carrying both (discriminated by a free-text reason) would collapse that.
+ *
+ * `note` is a fact worth keeping that is not a commitment. It is never nudged.
+ */
+export type TodoStatus = 'open' | 'blocked' | 'stalled' | 'note' | 'done' | 'dropped';
+export type TodoArea = 'personal' | 'work' | 'health' | 'family' | 'growth' | 'admin';
 export type TodoPriority = 'low' | 'normal' | 'high';
 
 export interface Todo {
   id: number;
   title: string;
   notes: string | null;
-  context: TodoContext;
+  area: TodoArea;
   priority: TodoPriority;
   status: TodoStatus;
   dueAt: string | null;
@@ -39,7 +49,7 @@ async function init(): Promise<void> {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL,
         notes TEXT,
-        context TEXT NOT NULL DEFAULT 'personal',
+        area TEXT NOT NULL DEFAULT 'personal',
         priority TEXT NOT NULL DEFAULT 'normal',
         status TEXT NOT NULL DEFAULT 'open',
         due_at TEXT,
@@ -54,6 +64,11 @@ async function init(): Promise<void> {
       )
     `)
     .then(async () => {
+      // Legacy rows used `context` for the life area, which collided with both
+      // "bounded context" and "context window". Renaming is a no-op once applied.
+      await db().execute('ALTER TABLE todos RENAME COLUMN context TO area').catch(() => undefined);
+      await db().execute("ALTER TABLE todos ADD COLUMN area TEXT NOT NULL DEFAULT 'personal'").catch(() => undefined);
+
       const columnsToAdd = [
         'nudged_for_due_at',
         'status_reason',
@@ -75,7 +90,7 @@ function toTodo(row: any): Todo {
     id: Number(row.id),
     title: String(row.title),
     notes: row.notes ?? null,
-    context: row.context,
+    area: row.area,
     priority: row.priority,
     status: row.status,
     dueAt: row.due_at ?? null,
@@ -109,7 +124,7 @@ export function computeEscalationLevel(
     Todo,
     | 'status'
     | 'dueAt'
-    | 'context'
+    | 'area'
     | 'priority'
     | 'lastNudgedAt'
     | 'statusReason'
@@ -120,7 +135,10 @@ export function computeEscalationLevel(
 ): number {
   let level = todo.escalationLevel ?? 0;
 
+  // `blocked` waits on someone else, so it is surfaced but never escalated — turning up
+  // the pressure on the owner for something outside their control is just noise.
   if (todo.status === 'blocked') level = Math.max(level, 1);
+  if (todo.status === 'stalled') level = Math.max(level, 2);
   if (todo.statusReason && todo.statusReason.toLowerCase().includes('busy')) level = Math.max(level, 1);
   if (todo.minimumViableAction) level = Math.max(level, 1);
 
@@ -131,11 +149,14 @@ export function computeEscalationLevel(
     if (hoursLate > 24) level = Math.max(level, 3);
   }
 
-  if (todo.lastNudgedAt) {
+  // Silence escalates only what the owner can actually act on.
+  const escalatesOnSilence =
+    todo.status !== 'done' && todo.status !== 'dropped' && todo.status !== 'blocked' && todo.status !== 'note';
+  if (todo.lastNudgedAt && escalatesOnSilence) {
     const lastNudged = new Date(todo.lastNudgedAt);
     const hoursSinceNudge = (now.getTime() - lastNudged.getTime()) / (60 * 60 * 1000);
-    if (hoursSinceNudge > 12 && todo.status !== 'done') level = Math.max(level, 2);
-    if (hoursSinceNudge > 24 && todo.status !== 'done') level = Math.max(level, 3);
+    if (hoursSinceNudge > 12) level = Math.max(level, 2);
+    if (hoursSinceNudge > 24) level = Math.max(level, 3);
   }
 
   if (todo.priority === 'high' && todo.status === 'open' && todo.dueAt && new Date(todo.dueAt) <= now) {
@@ -148,19 +169,19 @@ export function computeEscalationLevel(
 export async function addTodo(input: {
   title: string;
   notes?: string;
-  context?: TodoContext;
+  area?: TodoArea;
   priority?: TodoPriority;
   dueAt?: string;
   minimumViableAction?: string;
 }): Promise<Todo> {
   await init();
   const result = await db().execute({
-    sql: `INSERT INTO todos (title, notes, context, priority, status, due_at, minimum_viable_action, created_at)
+    sql: `INSERT INTO todos (title, notes, area, priority, status, due_at, minimum_viable_action, created_at)
           VALUES (?, ?, ?, ?, 'open', ?, ?, ?) RETURNING *`,
     args: [
       input.title,
       input.notes ?? null,
-      input.context ?? 'personal',
+      input.area ?? 'personal',
       input.priority ?? 'normal',
       input.dueAt ? toUtc(input.dueAt) : null,
       input.minimumViableAction ?? null,
@@ -172,7 +193,7 @@ export async function addTodo(input: {
 
 export async function listTodos(filter: {
   status?: TodoStatus;
-  context?: TodoContext;
+  area?: TodoArea;
   dueBefore?: string;
   includeSnoozed?: boolean;
   limit?: number;
@@ -184,9 +205,9 @@ export async function listTodos(filter: {
   where.push('status = ?');
   args.push(filter.status ?? 'open');
 
-  if (filter.context) {
-    where.push('context = ?');
-    args.push(filter.context);
+  if (filter.area) {
+    where.push('area = ?');
+    args.push(filter.area);
   }
   if (filter.dueBefore) {
     where.push('due_at IS NOT NULL AND due_at <= ?');
@@ -214,7 +235,7 @@ export async function updateTodo(
   patch: {
     title?: string;
     notes?: string;
-    context?: TodoContext;
+    area?: TodoArea;
     priority?: TodoPriority;
     status?: TodoStatus;
     dueAt?: string | null;
@@ -235,7 +256,7 @@ export async function updateTodo(
 
   if (patch.title !== undefined) push('title', patch.title);
   if (patch.notes !== undefined) push('notes', patch.notes);
-  if (patch.context !== undefined) push('context', patch.context);
+  if (patch.area !== undefined) push('area', patch.area);
   if (patch.priority !== undefined) push('priority', patch.priority);
   if (patch.dueAt !== undefined) push('due_at', patch.dueAt === null ? null : toUtc(patch.dueAt));
   if (patch.snoozedUntil !== undefined)
@@ -271,30 +292,51 @@ export async function getTodo(id: number): Promise<Todo | null> {
   return result.rows[0] ? toTodo(result.rows[0]) : null;
 }
 
+/** How long each status waits between nudges when it has no due time of its own. */
+export const NUDGE_COOLDOWN_HOURS = {
+  /** Stuck on the owner. Chasing is the entire point, so chase daily. */
+  stalled: 24,
+  /** Waiting on someone else. Surface it, but not every day. */
+  blocked: 72,
+} as const;
+
 /**
- * Tasks that have come due and have not been nudged since they came due.
+ * Tasks worth nudging right now.
  *
- * The standing check-ins only run a few times a day, so a task due at 11:00 would
- * otherwise be mentioned at breakfast and then not again until the afternoon sweep.
- * `last_nudged_at < due_at` is what keeps this to one ping per task rather than one
- * every time the sweep runs.
+ * Three independent branches, each with its own dedupe:
+ *
+ * - **due time** — one nudge per due time, tracked by `nudged_for_due_at`. A reschedule
+ *   earns a fresh one.
+ * - **stalled** / **blocked** — no due time to key off, so these dedupe on a
+ *   `last_nudged_at` cooldown instead.
+ *
+ * The cooldown is what makes an undated task terminate. The previous version selected
+ * every `blocked` row unconditionally and deduped only on `nudged_for_due_at = due_at`;
+ * for a row with no due date that assignment writes NULL, so the row re-selected on
+ * every sweep forever — 96 agent runs a day off a single blocked task.
+ *
+ * `note` is absent from the status list by design: a note is a fact, not a commitment.
  */
 export async function todosDueForNudge(withinMinutes = 15): Promise<Todo[]> {
   await init();
   const now = new Date();
+  const hoursAgo = (hours: number) => new Date(now.getTime() - hours * 3_600_000).toISOString();
   const result = await db().execute({
     sql: `SELECT * FROM todos
-          WHERE status IN ('open', 'blocked')
-            AND (
-              (due_at IS NOT NULL AND due_at <= ?)
-              OR status = 'blocked'
-            )
+          WHERE status IN ('open', 'blocked', 'stalled')
             AND (snoozed_until IS NULL OR snoozed_until <= ?)
-            AND (nudged_for_due_at IS NULL OR nudged_for_due_at <> due_at)
-          ORDER BY due_at ASC`,
+            AND (
+              (due_at IS NOT NULL AND due_at <= ?
+                AND (nudged_for_due_at IS NULL OR nudged_for_due_at <> due_at))
+              OR (status = 'stalled' AND (last_nudged_at IS NULL OR last_nudged_at <= ?))
+              OR (status = 'blocked' AND (last_nudged_at IS NULL OR last_nudged_at <= ?))
+            )
+          ORDER BY (due_at IS NULL), due_at ASC`,
     args: [
-      new Date(now.getTime() + withinMinutes * 60_000).toISOString(),
       now.toISOString(),
+      new Date(now.getTime() + withinMinutes * 60_000).toISOString(),
+      hoursAgo(NUDGE_COOLDOWN_HOURS.stalled),
+      hoursAgo(NUDGE_COOLDOWN_HOURS.blocked),
     ],
   });
 

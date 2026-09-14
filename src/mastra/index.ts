@@ -9,6 +9,7 @@ import {
   SensitiveDataFilter,
 } from '@mastra/observability';
 import { agent } from './agents/agent';
+import { nudger } from './agents/nudger';
 import { startScheduleTool, stopScheduleTool } from './tools/schedule-tools';
 import { addTodoTool, listTodosTool, updateTodoTool } from './tools/todo-tools';
 import {
@@ -28,7 +29,7 @@ export const mastra = new Mastra({
   bundler: {
     externals: ['@duckdb/node-bindings'],
   },
-  agents: { agent },
+  agents: { agent, nudger },
   tools: {
     startScheduleTool,
     stopScheduleTool,
@@ -59,14 +60,34 @@ export const mastra = new Mastra({
      * quarter hour affordable: it only wakes the agent when something is actually due.
      */
     prepare: async ({ schedule }) => {
-      if (!schedule.id.endsWith(DUE_SWEEP_ID)) return undefined;
+      /**
+       * Cron runs are formulaic and nobody is waiting on the reply, so they take the
+       * cheap lane: `flex` bills at Batch rates for slower, best-effort capacity, and
+       * low reasoning/verbosity keeps invisible reasoning tokens — billed as output —
+       * off a job that is mostly "read two lists and decide whether to speak".
+       *
+       * These settings are part of the cache key, so they are deliberately identical
+       * for every scheduled fire. Varying them per run would fragment the prefix cache
+       * and cost more than it saves.
+       */
+      const cheap = {
+        providerOptions: {
+          openai: { serviceTier: 'flex', reasoningEffort: 'low', textVerbosity: 'low' },
+        },
+      };
+
+      if (!schedule.id.endsWith(DUE_SWEEP_ID)) return cheap;
 
       const due = await todosDueForNudge();
       if (due.length === 0) return null;
 
-      const lines = due.map((todo) => `- [${todo.id}] ${todo.title} (due ${todo.dueAt})`);
+      const lines = due.map((todo) => {
+        const when = todo.dueAt ? `due ${todo.dueAt}` : `${todo.status}, no due date`;
+        return `- [${todo.id}] ${todo.title} (${when})`;
+      });
       return {
-        prompt: `These tasks have just come due:\n${lines.join('\n')}\n\nSend one short Telegram message about them, then mark each one nudged with todo_update.`,
+        ...cheap,
+        prompt: `These need attention now:\n${lines.join('\n')}\n\nSend one short Telegram message about them, then mark each one nudged with todo_update.`,
       };
     },
   },
@@ -119,17 +140,28 @@ const CHECK_INS = [
  * plain create would silently keep the cron and timezone from whichever boot
  * happened to run first — including the UTC default from before TIMEZONE was set.
  */
-const stored = await mastra.schedules.list({ agentId: 'agent' });
+/**
+ * The check-ins used to be bound to the main agent. Stored schedules survive restarts,
+ * so without this the old ones keep firing alongside the new ones: every check-in twice,
+ * and the duplicate still on the expensive model. Delete anything left on `agent`.
+ */
+for (const stale of await mastra.schedules.list({ agentId: 'agent' })) {
+  await mastra.schedules.delete(stale.id).catch((error) => {
+    mastra.getLogger().warn('Could not remove a stale schedule', { id: stale.id, error });
+  });
+}
+
+const stored = await mastra.schedules.list({ agentId: 'nudger' });
 const byId = new Map(stored.map((schedule) => [schedule.id, schedule]));
 
 for (const checkIn of CHECK_INS) {
-  const existing = byId.get(checkIn.id) ?? byId.get(`agent_${checkIn.id}`);
+  const existing = byId.get(checkIn.id) ?? byId.get(`nudger_${checkIn.id}`);
   const desired = { cron: checkIn.cron, timezone, prompt: checkIn.prompt };
 
   if (existing) {
     await mastra.schedules.update(existing.id, desired);
   } else {
-    await mastra.schedules.create({ id: checkIn.id, agentId: 'agent', ...desired });
+    await mastra.schedules.create({ id: checkIn.id, agentId: 'nudger', ...desired });
   }
 }
 

@@ -3,64 +3,113 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 const dbPath = './.tmp-life-manager-test.db';
-if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+for (const suffix of ['', '-shm', '-wal']) {
+  if (fs.existsSync(dbPath + suffix)) fs.unlinkSync(dbPath + suffix);
+}
 process.env.TURSO_DATABASE_URL = `file:${dbPath}`;
 process.env.TURSO_AUTH_TOKEN = '';
 
-const { addTodo, listTodos, updateTodo, computeEscalationLevel } = await import('./todos.ts');
+const { addTodo, listTodos, updateTodo, computeEscalationLevel, todosDueForNudge } =
+  await import('./todos.ts');
 
 test('supports life-goal tracking and blocked follow-up states', async () => {
   const todo = await addTodo({
     title: 'Gym session',
     notes: 'Need to move after work.',
-    context: 'health',
+    area: 'health',
     priority: 'high',
     dueAt: '2099-01-01T18:00:00+00:00',
     minimumViableAction: '10-minute walk and mobility',
   });
 
-  assert.equal(todo.context, 'health');
+  assert.equal(todo.area, 'health');
   assert.equal(todo.minimumViableAction, '10-minute walk and mobility');
 
   const updated = await updateTodo(todo.id, {
     status: 'blocked',
-    statusReason: 'Busy with family logistics and low energy',
+    statusReason: 'Waiting on the clinic to call back',
     escalationLevel: 1,
   });
 
   assert.equal(updated?.status, 'blocked');
-  assert.equal(updated?.statusReason, 'Busy with family logistics and low energy');
   assert.equal(updated?.escalationLevel, 1);
 
-  const blocked = await listTodos({ status: 'blocked', context: 'health' });
+  const blocked = await listTodos({ status: 'blocked', area: 'health' });
   assert.ok(blocked.some((item) => item.id === todo.id));
 });
 
-test('escalates blocked or overdue life tasks toward a practical next step', () => {
+test('escalates what the owner can act on, and leaves blocked alone', () => {
   const now = new Date('2026-09-04T12:00:00Z');
-
-  const overdue = {
-    status: 'open',
-    dueAt: '2026-09-04T10:00:00Z',
-    context: 'health',
-    priority: 'high',
-    lastNudgedAt: '2026-09-04T08:00:00Z',
+  const base = {
+    dueAt: null,
+    area: 'work',
+    priority: 'normal',
+    lastNudgedAt: null,
     statusReason: null,
-    minimumViableAction: '10-minute walk + mobility',
+    minimumViableAction: null,
     escalationLevel: 0,
   } as const;
 
-  const blocked = {
-    status: 'blocked',
-    dueAt: '2026-09-05T18:00:00Z',
-    context: 'family',
-    priority: 'normal',
-    lastNudgedAt: '2026-09-04T11:00:00Z',
-    statusReason: 'Busy with family logistics and low energy',
-    minimumViableAction: 'Message the clinic and book the first available slot',
-    escalationLevel: 1,
-  } as const;
+  // Stuck on the owner: chasing is the point.
+  assert.equal(computeEscalationLevel({ ...base, status: 'stalled' } as never, now), 2);
+  // Waiting on someone else: surfaced, never escalated.
+  assert.equal(computeEscalationLevel({ ...base, status: 'blocked' } as never, now), 1);
 
-  assert.ok(computeEscalationLevel(overdue as any, now) >= 1);
-  assert.ok(computeEscalationLevel(blocked as any, now) >= 1);
+  // Silence escalates a stalled task but must not escalate a blocked one, since the
+  // owner going quiet says nothing about a third party.
+  const silent = { ...base, lastNudgedAt: '2026-09-02T12:00:00Z' };
+  assert.ok(computeEscalationLevel({ ...silent, status: 'stalled' } as never, now) >= 3);
+  assert.equal(computeEscalationLevel({ ...silent, status: 'blocked' } as never, now), 1);
+
+  const overdue = {
+    ...base,
+    status: 'open',
+    dueAt: '2026-09-04T10:00:00Z',
+    minimumViableAction: '10-minute walk',
+  };
+  assert.ok(computeEscalationLevel(overdue as never, now) >= 1);
+});
+
+test('the nudge sweep terminates for every undated status', async () => {
+  // Regression: `blocked` with no due date used to re-select on every sweep forever,
+  // because markNudged wrote `nudged_for_due_at = due_at` — NULL — leaving the
+  // `nudged_for_due_at IS NULL` dedupe permanently true. One such task pinned the
+  // */15 cron on and cost 96 full agent runs a day.
+  const blocked = await addTodo({ title: 'chase-supplier', area: 'work' });
+  await updateTodo(blocked.id, { status: 'blocked' });
+
+  const stalled = await addTodo({ title: 'write-outline', area: 'work' });
+  await updateTodo(stalled.id, { status: 'stalled' });
+
+  const note = await addTodo({ title: 'gate-code-4821', area: 'personal' });
+  await updateTodo(note.id, { status: 'note' });
+
+  const mine = new Set([blocked.id, stalled.id, note.id]);
+  const sweepMine = async () =>
+    (await todosDueForNudge()).filter((t) => mine.has(t.id)).map((t) => t.title).sort();
+
+  assert.deepEqual(await sweepMine(), ['chase-supplier', 'write-outline'], 'a note must never be nudged');
+
+  for (const todo of await todosDueForNudge()) await updateTodo(todo.id, { markNudged: true });
+
+  // Inside the cooldown, both go quiet — this is the loop the old query never exited.
+  for (let sweep = 0; sweep < 3; sweep++) {
+    assert.deepEqual(await sweepMine(), [], `sweep ${sweep + 2} should be silent`);
+  }
+});
+
+test('a due task is nudged once per due time, and again when rescheduled', async () => {
+  const todo = await addTodo({
+    title: 'send-invoice',
+    area: 'work',
+    dueAt: new Date(Date.now() - 60_000).toISOString(),
+  });
+
+  assert.equal((await todosDueForNudge()).some((t) => t.id === todo.id), true);
+  await updateTodo(todo.id, { markNudged: true });
+  assert.equal((await todosDueForNudge()).some((t) => t.id === todo.id), false);
+
+  // Rescheduling into the past earns a fresh nudge.
+  await updateTodo(todo.id, { dueAt: new Date(Date.now() - 30_000).toISOString() });
+  assert.equal((await todosDueForNudge()).some((t) => t.id === todo.id), true);
 });

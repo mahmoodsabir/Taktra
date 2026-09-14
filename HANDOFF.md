@@ -33,17 +33,20 @@ public URL, no tunnel, and nothing to forward through a router.
 
 ```
 Telegram bot (own identity, long polling)
-  └─ @chat-adapter/telegram ──> Mastra channels ──> agent "agent"
+  └─ @chat-adapter/telegram ──> Mastra channels ──> agent "agent"   (AGENT_MODEL)
                                                      ├─ todo_* tools     → todos table (libSQL)
                                                      ├─ calendar_* tools → Google Calendar API
                                                      └─ send_telegram    → outbound push
-Cron schedules (in-process) ──> threadless agent runs ──> send_telegram
+Cron schedules (in-process) ──> threadless runs ──> agent "nudger" (NUDGE_MODEL)
+                                                     └─ read-only + send_telegram
+                          both agents share one Memory instance
 ```
 
 | Path | File |
 | --- | --- |
 | Agent: instructions, memory, channel wiring | `src/mastra/agents/agent.ts` |
 | Mastra instance, schedules, `prepare` hook | `src/mastra/index.ts` |
+| Scheduled check-ins, cheaper model | `src/mastra/agents/nudger.ts` |
 | Telegram adapter, polling loop, owner chat | `src/mastra/lib/telegram.ts` |
 | Unprompted outbound push | `src/mastra/lib/notify.ts` |
 | Task store (libSQL) | `src/mastra/lib/todos.ts` |
@@ -51,10 +54,16 @@ Cron schedules (in-process) ──> threadless agent runs ──> send_telegram
 | Tools | `src/mastra/tools/` |
 | One-time Google consent | `scripts/google-auth.mjs` |
 | User-facing setup guide | `SETUP.md` |
+| Domain glossary | `CONTEXT.md` |
+| Architecture decisions | `docs/adr/` |
 
 Dependencies: `@chat-adapter/telegram`, `googleapis`. The Baileys-era packages
 (`chat-adapter-baileys`, `@chat-adapter/whatsapp`, `qrcode`, `@types/qrcode`) have been
 removed.
+
+**The agent has no workspace, filesystem, or shell.** That is deliberate and it is not a
+missing piece — see `docs/adr/0002-no-agent-workspace.md`. Its tool schemas were about
+half of every prompt, for a capability that was never used once.
 
 ## Four non-obvious things that will cost you hours
 
@@ -101,7 +110,9 @@ calendar, tasks, and memory.
 ## Schedules
 
 Defined in `index.ts`, **reconciled on every boot** — edit the cron there and it updates
-in place rather than keeping whatever the first boot stored.
+in place rather than keeping whatever the first boot stored. They are bound to the
+`nudger` agent; boot also deletes any schedule still bound to `agent`, so the check-ins
+cannot fire twice after the split.
 
 | id | cron (Asia/Baghdad) | purpose |
 | --- | --- | --- |
@@ -115,9 +126,18 @@ in place rather than keeping whatever the first boot stored.
 which **skips the fire entirely — no agent run, no model call, no cost.** Only build new
 high-frequency schedules this way.
 
-One-nudge-per-due-time is enforced by the `nudged_for_due_at` column, not by
-`last_nudged_at`. Comparing against `last_nudged_at` is wrong: a task nudged *before* it
-comes due would re-fire forever.
+The sweep has three independent branches, each with its own dedupe. A task with a due
+time is nudged once per due time, tracked by `nudged_for_due_at`, so a reschedule earns a
+fresh one — comparing against `last_nudged_at` here would be wrong, since a task nudged
+*before* it came due would re-fire forever. Undated `stalled` and `blocked` tasks have no
+due time to key off, so they dedupe on a `last_nudged_at` cooldown instead: 24h and 72h
+respectively.
+
+**This is a fixed bug, do not merge the branches back together.** The old query selected
+every `blocked` row unconditionally and deduped only on `nudged_for_due_at = due_at`. For
+a row with no due date that assignment writes NULL, leaving the `IS NULL` check
+permanently true — one blocked, undated task pinned the `*/15` sweep on forever, at 96
+full agent runs a day. `todos.test.ts` has the regression test.
 
 ## Notifications
 
@@ -138,8 +158,9 @@ Real credentials are in `.env` (gitignored); `.env.example` documents the shape.
 | `TELEGRAM_ALLOWED_USER_IDS` | comma-separated numeric user IDs — **never leave blank** |
 | `TELEGRAM_OWNER_CHAT_ID` | private chat for scheduled pushes; same number as his user ID |
 | `TIMEZONE` | `Asia/Baghdad` |
-| `AGENT_MODEL` | optional; defaults to `openai/gpt-5.6-terra` |
-| `MEMORY_MODEL` | optional; defaults to `openai/gpt-5-mini` |
+| `AGENT_MODEL` | interactive chat; defaults to `openai/gpt-5.6-terra` |
+| `NUDGE_MODEL` | scheduled check-ins; defaults to `openai/gpt-5.6-luna` |
+| `MEMORY_MODEL` | observations and titles; defaults to `openai/gpt-5.6-luna` |
 | `TURSO_DATABASE_URL` | absolute `file:` URL to `mastra.db` — **keep absolute** |
 | `GOOGLE_CLIENT_ID` / `_SECRET` / `_REFRESH_TOKEN` | Desktop-app OAuth |
 

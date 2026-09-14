@@ -1,7 +1,4 @@
 import { Agent } from '@mastra/core/agent';
-import { TaskSignalProvider } from '@mastra/core/signals';
-import { webFetchTool, webSearchTool } from '@mastra/core/tools';
-import { LocalFilesystem, LocalSandbox, WORKSPACE_TOOLS, Workspace } from '@mastra/core/workspace';
 import { Memory } from '@mastra/memory';
 import { telegramAdapter } from '../lib/telegram';
 import { startScheduleTool, stopScheduleTool } from '../tools/schedule-tools';
@@ -14,7 +11,6 @@ import {
 } from '../tools/calendar-tools';
 import { notifyTool } from '../tools/notify-tool';
 
-const workspacePath = 'workspace';
 const timezone = process.env.TIMEZONE || 'UTC';
 
 /**
@@ -22,29 +18,66 @@ const timezone = process.env.TIMEZONE || 'UTC';
  * form is Mastra's routing prefix, so these can point at a non-OpenAI provider too.
  */
 const agentModel = process.env.AGENT_MODEL || 'openai/gpt-5.6-terra';
-const memoryModel = process.env.MEMORY_MODEL || 'openai/gpt-5-mini';
+const memoryModel = process.env.MEMORY_MODEL || 'openai/gpt-5.6-luna';
 
-const workspace = new Workspace({
-  id: 'agent-workspace',
-  name: 'Agent Workspace',
-  filesystem: new LocalFilesystem({
-    basePath: workspacePath,
-  }),
-  sandbox: new LocalSandbox({
-    workingDirectory: workspacePath,
-  }),
-  tools: {
-    [WORKSPACE_TOOLS.FILESYSTEM.WRITE_FILE]: {
-      requireReadBeforeWrite: true,
+/** The owner's own memory: Telegram, and scheduled runs acting on their behalf. */
+export const OWNER_RESOURCE_ID = 'agent';
+/** Development sessions in Studio, kept out of the owner's long-term memory. */
+export const STUDIO_RESOURCE_ID = 'studio';
+
+/**
+ * One Memory instance, shared with the nudger agent.
+ *
+ * Both agents speak to the same person about the same commitments, so they must read and
+ * write one working-memory document and one observation record. Two Memory instances
+ * would silently fork the owner's history down the middle.
+ */
+export const sharedMemory = new Memory({
+  options: {
+    // `true` resolves to the agent's own model, so every new thread would write an
+    // 80-character title at main-model rates.
+    generateTitle: { model: memoryModel },
+    workingMemory: {
+      enabled: true,
+      scope: 'resource',
+      template: `# User
+
+- **Name**:
+- **Timezone**:
+- **Working hours**:
+- **Business / role**:
+
+# Standing context
+
+- **Recurring commitments**:
+- **People who come up often**:
+- **Current priorities**:
+
+# Preferences
+
+- **How and when they want to be nudged**:
+- **Topics to stay quiet about**:
+`,
     },
-    [WORKSPACE_TOOLS.FILESYSTEM.EDIT_FILE]: {
-      requireReadBeforeWrite: true,
+    observationalMemory: {
+      model: memoryModel,
+      /**
+       * The defaults (30k message tokens, 40k observation tokens) are sized for far
+       * chattier traffic. At this volume they meant nothing was observed for eleven
+       * days. Lower thresholds both shrink the per-step payload and make long-term
+       * recall actually happen.
+       */
+      observation: { messageTokens: 8_000 },
+      reflection: { observationTokens: 10_000 },
+      /**
+       * Thread scope (the default) throws when a run has no thread, which is every
+       * scheduled check-in — they fire threadless, so the whole reminder path died
+       * before it reached the model. Resource scope also matches the single shared
+       * resourceId, so observations carry across Studio and Telegram.
+       */
+      scope: 'resource',
     },
-    [WORKSPACE_TOOLS.FILESYSTEM.DELETE]: {
-      requireApproval: true,
-    },
-  },
-});
+  },});
 
 export const agent = new Agent({
   id: 'agent',
@@ -61,7 +94,7 @@ Treat ordinary conversation as input, not just explicit commands. When they ment
 
 This is a life manager, not only a work task tracker. Track personal, health, family, growth, admin, and work commitments in the same system. If a message mentions fitness, sleep, a family matter, a personal errand, learning, health, or a life admin task, it still goes into todo_add.
 
-If a message is a note rather than a task (a decision, a number, a name, an idea), keep it in working memory or write it to the workspace. Not everything is a todo.
+If a message is a note rather than a task — a decision, a number, a name, an idea — still log it with todo_add, then set status to "note" with todo_update. Notes are kept and searchable but never nudged. Standing facts about the user (their working hours, who matters to them, how they want to be nudged) belong in working memory instead. Not everything is a commitment.
 
 When something has a real time and place, it belongs on the calendar via calendar_create_event, not only in the task list. Check calendar_list_events for conflicts before you book anything.
 
@@ -77,7 +110,8 @@ Before you nudge:
 - Pull todo_list and calendar_list_events so you know the real state.
 - Skip anything snoozed, or already nudged recently — check lastNudgedAt.
 - Understand whether the user is busy, overloaded, distracted, or simply lazy. Do not treat every missed task as a lack of care.
-- If a task is stalled or blocked, call todo_update with status="blocked" and a statusReason explaining the problem.
+- When a task is not moving, say who it is waiting on. Use status="blocked" when it is waiting on someone else, and status="stalled" when it is stuck on the user themselves — overwhelm, avoidance, or drift. Add a statusReason either way.
+- These earn different follow-ups. A stalled task is chased daily and escalates the longer it sits: ask for the minimum viable action. A blocked task is raised every few days at most and never escalates — pressuring the user for something outside their control is noise. For a blocked task, offer to draft the chase message instead of asking whether they have done it.
 - For any task in a hard week, prefer the smallest meaningful next step over the full ideal version.
 - Batch related items into one message. Several notifications in a row is a failure.
 - Say nothing at all if nothing is genuinely due. Silence is a valid outcome and the right one most of the time.
@@ -103,46 +137,14 @@ Keep Telegram messages to a few lines. This arrives as a phone notification, not
 Ask a question only when the answer changes what you would do. Otherwise pick the sensible default and say what you picked.`,
   model: agentModel,
   defaultOptions: {
-    maxSteps: 100,
-    autoResumeSuspendedTools: true,
+    /**
+     * Measured: the median turn takes 2 steps and the mean 3.2, but one runaway hit 63.
+     * Every step replays the whole transcript, so cost grows quadratically with depth —
+     * 15 leaves generous headroom over the realistic worst case while capping the tail.
+     */
+    maxSteps: 15,
   },
-  memory: new Memory({
-    options: {
-      generateTitle: true,
-      workingMemory: {
-        enabled: true,
-        scope: 'resource',
-        template: `# User
-
-- **Name**:
-- **Timezone**:
-- **Working hours**:
-- **Business / role**:
-
-# Standing context
-
-- **Recurring commitments**:
-- **People who come up often**:
-- **Current priorities**:
-
-# Preferences
-
-- **How and when they want to be nudged**:
-- **Topics to stay quiet about**:
-`,
-      },
-      observationalMemory: {
-        model: memoryModel,
-        /**
-         * Thread scope (the default) throws when a run has no thread, which is every
-         * scheduled check-in — they fire threadless, so the whole reminder path died
-         * before it reached the model. Resource scope also matches the single shared
-         * resourceId, so observations carry across Studio and Telegram.
-         */
-        scope: 'resource',
-      },
-    },
-  }),
+  memory: sharedMemory,
   channels: {
     adapters: {
       // Registered only once a bot token exists, so an unconfigured Telegram is absent
@@ -150,12 +152,14 @@ Ask a question only when the answer changes what you would do. Otherwise pick th
       ...(telegramAdapter ? { telegram: telegramAdapter } : {}),
     },
     /**
-     * Channel threads default to a per-platform resourceId, which files Telegram
-     * conversations under a different owner than the ones started in
-     * Studio — so they never show up in its thread list, and resource-scoped working
-     * memory is split in two. There is only one user here, so both share one resource.
+     * Channel threads default to a per-platform resourceId. Pinning every channel to
+     * one resource keeps working memory and observations in a single place.
+     *
+     * Studio is deliberately excluded elsewhere (see `STUDIO_RESOURCE_ID`): development
+     * sessions were being filed as the owner's life, so build logs ended up in the
+     * long-term memory of an agent meant to remember commitments.
      */
-    resolveResourceId: () => 'agent',
+    resolveResourceId: () => OWNER_RESOURCE_ID,
     handlers: {
       /**
        * Each inbound message is checked against an allowlist before the agent answers.
@@ -172,7 +176,6 @@ Ask a question only when the answer changes what you would do. Otherwise pick th
       onMention: false,
     },
   },
-  workspace,
   tools: {
     todo_add: addTodoTool,
     todo_list: listTodosTool,
@@ -184,8 +187,5 @@ Ask a question only when the answer changes what you would do. Otherwise pick th
     send_telegram: notifyTool,
     start_schedule: startScheduleTool,
     stop_schedule: stopScheduleTool,
-    web_fetch: webFetchTool,
-    web_search: webSearchTool,
   },
-  signals: [new TaskSignalProvider()],
 });

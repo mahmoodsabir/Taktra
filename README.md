@@ -8,6 +8,8 @@ The product is not just a task list. It captures commitments, tracks what is sli
 
 ## Product docs
 
+- [CONTEXT.md](CONTEXT.md) — the domain glossary: what a commitment, a nudge, and `blocked` vs `stalled` actually mean
+- [docs/adr/](docs/adr/) — architecture decisions and why they were made
 - [docs/LIVING_PRODUCT_GUIDE.md](docs/LIVING_PRODUCT_GUIDE.md) — source-of-truth product guide
 - [docs/FEATURES_AND_USAGE.md](docs/FEATURES_AND_USAGE.md) — living feature overview and usage guide
 - [docs/FEATURES_LANDING_PAGE.html](docs/FEATURES_LANDING_PAGE.html) — polished landing page overview

@@ -1,10 +1,10 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import { addTodo, listTodos, updateTodo, type TodoContext, type TodoPriority } from '../lib/todos';
+import { addTodo, listTodos, updateTodo, type TodoArea, type TodoPriority } from '../lib/todos';
 
-const contextEnum = z.enum(['personal', 'work', 'health', 'family', 'growth', 'admin']);
+const areaEnum = z.enum(['personal', 'work', 'health', 'family', 'growth', 'admin']);
 const priorityEnum = z.enum(['low', 'normal', 'high']);
-const statusEnum = z.enum(['open', 'blocked', 'done', 'dropped']);
+const statusEnum = z.enum(['open', 'blocked', 'stalled', 'note', 'done', 'dropped']);
 
 export const addTodoTool = createTool({
   id: 'todo_add',
@@ -13,7 +13,7 @@ export const addTodoTool = createTool({
   inputSchema: z.object({
     title: z.string().describe('Short imperative summary, e.g. "Send Q3 invoice to Acme".'),
     notes: z.string().optional().describe('Any extra detail worth remembering.'),
-    context: contextEnum.default('personal').describe('Life area or category including personal, work, health, family, growth, or admin.'),
+    area: areaEnum.default('personal').describe('Life area: personal, work, health, family, growth, or admin.'),
     priority: priorityEnum.default('normal'),
     dueAt: z
       .string()
@@ -24,11 +24,11 @@ export const addTodoTool = createTool({
       .optional()
       .describe('A reduced version of the task that can still move it forward when the user is overloaded, busy, or lazy.'),
   }),
-  execute: async ({ title, notes, context, priority, dueAt, minimumViableAction }) =>
+  execute: async ({ title, notes, area, priority, dueAt, minimumViableAction }) =>
     addTodo({
       title,
       notes,
-      context: context as TodoContext,
+      area: area as TodoArea,
       priority: priority as TodoPriority,
       dueAt,
       minimumViableAction,
@@ -41,16 +41,16 @@ export const listTodosTool = createTool({
     'List tracked tasks. Defaults to open, non-snoozed tasks sorted by due date then priority.',
   inputSchema: z.object({
     status: statusEnum.default('open'),
-    context: contextEnum.optional().describe('Filter by life area such as personal, work, health, family, growth, or admin.'),
+    area: areaEnum.optional().describe('Filter by life area: personal, work, health, family, growth, or admin.'),
     dueBefore: z
       .string()
       .optional()
       .describe('ISO 8601 datetime. Only return tasks due at or before this moment.'),
     includeSnoozed: z.boolean().default(false),
-    limit: z.number().int().min(1).max(200).default(100),
+    limit: z.number().int().min(1).max(200).default(25),
   }),
-  execute: async ({ status, context, dueBefore, includeSnoozed, limit }) => {
-    const todos = await listTodos({ status, context, dueBefore, includeSnoozed, limit });
+  execute: async ({ status, area, dueBefore, includeSnoozed, limit }) => {
+    const todos = await listTodos({ status, area, dueBefore, includeSnoozed, limit });
     return { count: todos.length, todos };
   },
 });
@@ -63,9 +63,13 @@ export const updateTodoTool = createTool({
     id: z.number().int().describe('Task id from todo_add or todo_list.'),
     title: z.string().optional(),
     notes: z.string().optional(),
-    context: contextEnum.optional(),
+    area: areaEnum.optional(),
     priority: priorityEnum.optional(),
-    status: statusEnum.optional().describe('Use "blocked" when the task is genuinely stalled or overwhelmed; "done" when finished; "dropped" when abandoned.'),
+    status: statusEnum
+      .optional()
+      .describe(
+        'Pick the one that matches who is holding it up. "blocked" = waiting on someone else, so the user cannot move it alone. "stalled" = stuck on the user themselves, through overwhelm, avoidance, or drift. "note" = a fact worth keeping that is not a commitment and must never be nudged. "done" when finished; "dropped" when abandoned.',
+      ),
     dueAt: z.string().nullable().optional().describe('ISO 8601 datetime, or null to clear.'),
     snoozedUntil: z
       .string()
