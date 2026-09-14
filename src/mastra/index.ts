@@ -114,7 +114,7 @@ const CHECK_INS = [
     id: 'morning-brief',
     cron: '0 8 * * *',
     prompt:
-      "Morning brief. Look at today's calendar and everything open or overdue. If there is something worth flagging, send one short Telegram message: what's on today, and what needs to move. Stay silent if the day is genuinely clear.",
+      "Morning brief. Check open, non-snoozed tasks across every area and the calendar for the next 48 hours. Stay silent unless something is genuinely due or at risk. Batch everything into one short Telegram message: what is on today, and what needs to move. Flag anything time-specific that needs preparing today.",
   },
   {
     id: 'midday-sweep',

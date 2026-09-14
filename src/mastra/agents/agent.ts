@@ -10,6 +10,7 @@ import {
   updateEventTool,
 } from '../tools/calendar-tools';
 import { notifyTool } from '../tools/notify-tool';
+import { notifyOwner } from '../lib/notify';
 
 const timezone = process.env.TIMEZONE || 'UTC';
 
@@ -79,6 +80,39 @@ export const sharedMemory = new Memory({
     },
   },});
 
+/**
+ * Turn a crash into a sentence the owner can act on.
+ *
+ * Without this the raw failure is what lands in the chat — "You have no credits
+ * remaining", "read ETIMEDOUT" — which reads as the agent breaking rather than telling
+ * them something. Worse, a silent failure looks exactly like being ignored, and an
+ * accountability agent that appears to ignore you is worse than no agent.
+ */
+async function handleOrApologize<TThread, TMessage>(
+  thread: TThread,
+  message: TMessage,
+  defaultHandler: (thread: TThread, message: TMessage) => Promise<unknown>,
+): Promise<void> {
+  try {
+    await defaultHandler(thread, message);
+    return;
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    const explain = /credit|quota|billing|insufficient/i.test(text)
+      ? "I'm out of API credit, so I can't think right now. Top it up and say that again — I have not saved this one."
+      : /timeout|etimedout|econnreset|fetch failed|network/i.test(text)
+        ? "I couldn't reach the model just then. Say that again in a moment — I have not saved this one."
+        : "Something broke on my side and I could not process that. It is not saved, so please send it again.";
+
+    try {
+      await notifyOwner(explain);
+    } catch {
+      // Telegram is down too. Nothing left to do but leave it in the logs.
+    }
+    throw error;
+  }
+}
+
 export const agent = new Agent({
   id: 'agent',
   name: 'Productivity Agent',
@@ -91,6 +125,10 @@ Their timezone is ${timezone}. Resolve every relative time ("tomorrow", "next we
 ## Capture
 
 Treat ordinary conversation as input, not just explicit commands. When they mention something they need to do — even buried mid-sentence, even phrased as a complaint — log it with todo_add. Do not ask permission to capture; capture first and mention it in one short line.
+
+**An explicit request — "remind me", "don't let me forget", "I need to" — always produces a todo_add before you reply. No exceptions.** Not when the message is terse, not when it is only a time and a name ("tomorrow 4pm abood job"), not when it is mostly a link. A bare link with a time is a reminder about that link: capture it and put the URL in notes. If the request is ambiguous, capture your best reading first and ask afterwards — an unlogged commitment is the one failure this product cannot have.
+
+Confirm what you captured by naming it back, with its time. Silence after a reminder request reads as "done" and is how things get lost.
 
 This is a life manager, not only a work task tracker. Track personal, health, family, growth, admin, and work commitments in the same system. If a message mentions fitness, sleep, a family matter, a personal errand, learning, health, or a life admin task, it still goes into todo_add.
 
@@ -106,8 +144,10 @@ When a task is emotionally or practically difficult, capture the minimum viable 
 
 You will be woken on a schedule with no user message in front of you. That is your cue to decide whether they are worth interrupting, then reach them with send_telegram.
 
+Pass the id of every task you mention in the todoIds argument. That marks them nudged as part of delivery. Never mark a task nudged with todo_update yourself: doing it separately means a failed send still spends the task's nudge budget, and the task then goes quiet forever.
+
 Before you nudge:
-- Pull todo_list and calendar_list_events so you know the real state.
+- Pull todo_list and calendar_list_events so you know the real state. Call each at most once per run — if todo_list comes back empty, it is empty, and calling it again will not change that.
 - Skip anything snoozed, or already nudged recently — check lastNudgedAt.
 - Understand whether the user is busy, overloaded, distracted, or simply lazy. Do not treat every missed task as a lack of care.
 - When a task is not moving, say who it is waiting on. Use status="blocked" when it is waiting on someone else, and status="stalled" when it is stuck on the user themselves — overwhelm, avoidance, or drift. Add a statusReason either way.
@@ -127,6 +167,12 @@ A task you never resolve is worse than one you never logged. When they say somet
 If the user says they are busy with life, family, work, or another priority, do not just keep pushing the original version. Reduce scope, reschedule, or convert it to a smaller action. The goal is momentum and closure, not guilt.
 
 Push back when their list is unrealistic for the time their calendar actually leaves them. That is the job.
+
+## Working memory
+
+Working memory holds standing facts that stay true for weeks: who they are, their hours, the people who recur, how they want to be nudged. Write to it when one of those actually changes.
+
+Do not write live status to it. "He is on his way", "he just arrived", "running late" are ephemeral — they belong in the conversation, and if they matter to a commitment they belong in that task's notes. Rewriting working memory for a passing update costs a round-trip and buys nothing.
 
 ## Tone
 
@@ -162,15 +208,16 @@ Ask a question only when the answer changes what you would do. Otherwise pick th
     resolveResourceId: () => OWNER_RESOURCE_ID,
     handlers: {
       /**
-       * Each inbound message is checked against an allowlist before the agent answers.
-       * Anything else is dropped silently — replying "you are not authorized" to a
-       * stranger would still be the agent talking to them.
+       * Senders are gated by the adapter, which drops anyone outside
+       * TELEGRAM_ALLOWED_USER_IDS before a message reaches Mastra. Rejections are silent
+       * by design — replying "you are not authorized" to a stranger would still be the
+       * agent talking to them.
        */
       onDirectMessage: async (thread, message, defaultHandler) => {
-        await defaultHandler(thread, message);
+        await handleOrApologize(thread, message, defaultHandler);
       },
       onSubscribedMessage: async (thread, message, defaultHandler) => {
-        await defaultHandler(thread, message);
+        await handleOrApologize(thread, message, defaultHandler);
       },
       // Group mentions are never wanted here; this agent is single-user.
       onMention: false,
