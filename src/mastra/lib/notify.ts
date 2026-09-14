@@ -1,4 +1,5 @@
 import { telegramAdapter, telegramOwnerChatId } from './telegram';
+import { updateTodo } from './todos';
 
 export interface NotifyResult {
   delivered: 'telegram';
