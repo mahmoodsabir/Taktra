@@ -1,10 +1,40 @@
-Solution name: Taktra = task + traction. 
+# Taktra
 
-# mastra
+**Taktra = task + traction.** A personal accountability partner built on Mastra, reachable over Telegram.
 
-Welcome to your new [Mastra](https://mastra.ai) project! We're excited to see what you build.
+It is designed to manage the user’s life in one place: work, personal admin, family matters, health, fitness, learning, and long-term goals.
 
-This starter provides you with a general-purpose Mastra agent that can research current information, manage multi-step tasks, work with local files, run approved shell commands, and create recurring schedules.
+The product is not just a task list. It captures commitments, tracks what is slipping, follows up at the right moment, and nudges the user toward a clear next step without turning into spam.
+
+## Product docs
+
+- [docs/LIVING_PRODUCT_GUIDE.md](docs/LIVING_PRODUCT_GUIDE.md) — source-of-truth product guide
+- [docs/FEATURES_AND_USAGE.md](docs/FEATURES_AND_USAGE.md) — living feature overview and usage guide
+- [docs/FEATURES_LANDING_PAGE.html](docs/FEATURES_LANDING_PAGE.html) — polished landing page overview
+
+## Product summary
+
+- captures tasks and commitments from ordinary conversation
+- tracks life areas beyond work, including health, family, and growth
+- follows up when something is at risk of slipping
+- supports blocked, overloaded, and lazy states without shame
+- asks for the smallest meaningful next step when the user is overwhelmed
+- keeps important tasks from disappearing silently
+
+## Core architecture
+
+- [src/mastra/agents/agent.ts](src/mastra/agents/agent.ts) defines the accountability agent behavior
+- [src/mastra/index.ts](src/mastra/index.ts) wires recurring check-ins and follow-up scheduling
+- [src/mastra/tools/todo-tools.ts](src/mastra/tools/todo-tools.ts) handles task creation and updates
+- [src/mastra/lib/todos.ts](src/mastra/lib/todos.ts) represents the task data lifecycle
+
+## Living product documentation
+
+The product guide is here:
+
+- [docs/LIVING_PRODUCT_GUIDE.md](docs/LIVING_PRODUCT_GUIDE.md)
+
+This guide should be updated whenever the product, reminder policy, or task model changes.
 
 ## Features
 
@@ -18,19 +48,21 @@ This starter provides you with a general-purpose Mastra agent that can research 
 
 ## Get started
 
-Set your `OPENAI_API_KEY` in `.env` or in your environment, then run:
+Full setup — Telegram bot, Google Calendar, allowlist — is in [SETUP.md](SETUP.md).
+
+The short version: copy `.env.example` to `.env`, fill in `OPENAI_API_KEY`,
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`, and `TELEGRAM_OWNER_CHAT_ID`, then run:
 
 ```shell
 npm run dev
 ```
 
-Open [http://localhost:4111](http://localhost:4111) in your browser to access [Mastra Studio](https://mastra.ai/docs/studio/overview).
+Open [http://localhost:4111](http://localhost:4111) for [Mastra Studio](https://mastra.ai/docs/studio/overview),
+or just message the bot on Telegram. Try:
 
-Select **Agent** in Mastra Studio and try one of these prompts:
-
-- `Get the weather forecast for Austin this weekend.`
-- `Create a landing page for a Japanese sakura festival.`
-- `Check the SPCX stock price now, then check it every minute.`
+- `Remind me to call the accountant tomorrow at 11.`
+- `What's on today?`
+- `I'm overloaded — what's the one thing I should actually do?`
 
 The agent asks for approval before it changes files or runs commands. When it creates a schedule, it returns an ID that you can use to pause the schedule.
 

@@ -1,13 +1,16 @@
 {
-  "name": "mastra",
+  "name": "taktra",
   "version": "1.0.0",
-  "description": "A general-purpose Mastra agent with a local workspace, shell tools, memory, task tracking, web access, and recurring schedules.",
+  "description": "Taktra (task + traction): a personal accountability agent over Telegram. Captures tasks and notes, manages Google Calendar, and follows up until things are closed out.",
   "main": "index.js",
   "private": true,
   "scripts": {
     "dev": "mastra dev",
     "build": "mastra build",
-    "start": "mastra start"
+    "start": "mastra start",
+    "google:auth": "node --env-file-if-exists=.env scripts/google-auth.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types \"src/**/*.test.ts\""
   },
   "keywords": [],
   "author": "",
@@ -17,11 +20,13 @@
     "node": ">=22.13.0"
   },
   "dependencies": {
+    "@chat-adapter/telegram": "^4.39.0",
     "@mastra/core": "1.63.2",
     "@mastra/duckdb": "1.6.3",
     "@mastra/libsql": "1.22.2",
     "@mastra/memory": "1.28.1",
     "@mastra/observability": "1.17.4",
+    "googleapis": "^176.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
