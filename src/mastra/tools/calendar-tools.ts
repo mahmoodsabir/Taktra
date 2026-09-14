@@ -1,6 +1,6 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import { CALENDAR_ID, TIMEZONE, calendar, summarizeEvent } from '../lib/google';
+import { CALENDAR_ID, TIMEZONE, summarizeEvent, withCalendar } from '../lib/google';
 
 const timed = z.object({
   dateTime: z.string().describe('ISO 8601 datetime, e.g. "2026-09-02T14:00:00+03:00".'),
@@ -18,15 +18,17 @@ export const listEventsTool = createTool({
     maxResults: z.number().int().min(1).max(250).default(50),
   }),
   execute: async ({ timeMin, timeMax, query, maxResults }) => {
-    const response = await calendar().events.list({
-      calendarId: CALENDAR_ID,
-      timeMin,
-      timeMax,
-      q: query,
-      maxResults,
-      singleEvents: true,
-      orderBy: 'startTime',
-    });
+    const response = await withCalendar((api) =>
+      api.events.list({
+        calendarId: CALENDAR_ID,
+        timeMin,
+        timeMax,
+        q: query,
+        maxResults,
+        singleEvents: true,
+        orderBy: 'startTime',
+      }),
+    );
     const events = (response.data.items ?? []).map(summarizeEvent);
     return { count: events.length, events };
   },
@@ -51,7 +53,7 @@ export const createEventTool = createTool({
       .describe('Minutes before start for a popup reminder. Omit for calendar defaults.'),
   }),
   execute: async ({ title, start, end, description, location, attendees, reminderMinutes }) => {
-    const response = await calendar().events.insert({
+    const response = await withCalendar((api) => api.events.insert({
       calendarId: CALENDAR_ID,
       sendUpdates: attendees?.length ? 'all' : 'none',
       requestBody: {
@@ -66,7 +68,7 @@ export const createEventTool = createTool({
             ? { useDefault: true }
             : { useDefault: false, overrides: [{ method: 'popup', minutes: reminderMinutes }] },
       },
-    });
+    }));
     return summarizeEvent(response.data);
   },
 });
@@ -83,7 +85,7 @@ export const updateEventTool = createTool({
     location: z.string().optional(),
   }),
   execute: async ({ eventId, title, start, end, description, location }) => {
-    const response = await calendar().events.patch({
+    const response = await withCalendar((api) => api.events.patch({
       calendarId: CALENDAR_ID,
       eventId,
       requestBody: {
@@ -93,7 +95,7 @@ export const updateEventTool = createTool({
         ...(start && { start: { dateTime: start.dateTime, timeZone: start.timeZone ?? TIMEZONE } }),
         ...(end && { end: { dateTime: end.dateTime, timeZone: end.timeZone ?? TIMEZONE } }),
       },
-    });
+    }));
     return summarizeEvent(response.data);
   },
 });
@@ -106,7 +108,7 @@ export const deleteEventTool = createTool({
   }),
   requireApproval: true,
   execute: async ({ eventId }) => {
-    await calendar().events.delete({ calendarId: CALENDAR_ID, eventId });
+    await withCalendar((api) => api.events.delete({ calendarId: CALENDAR_ID, eventId }));
     return { deleted: eventId };
   },
 });

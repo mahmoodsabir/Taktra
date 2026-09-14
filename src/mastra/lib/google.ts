@@ -1,4 +1,5 @@
 import { google, type calendar_v3 } from 'googleapis';
+import { isAuthExpired } from './google-auth-detect';
 
 const REQUIRED = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN'] as const;
 
@@ -30,6 +31,25 @@ export function calendar(): calendar_v3.Calendar {
 
   cached = google.calendar({ version: 'v3', auth });
   return cached;
+}
+
+/** A message the agent can relay verbatim when the connection has lapsed. */
+export const RECONNECT_MESSAGE =
+  'Google Calendar needs reconnecting — the authorisation expired, which happens about every 7 days while the app is unverified. Run "npm run google:auth" and paste the new GOOGLE_REFRESH_TOKEN into .env. Until then I cannot see or change the calendar, so treat anything I say about it as unverified.';
+
+/**
+ * Run a Calendar call, turning an expired authorisation into an instruction.
+ *
+ * Without this the raw `invalid_grant` reaches the model, which has historically decided
+ * to carry on without calendar data rather than say anything.
+ */
+export async function withCalendar<T>(run: (api: calendar_v3.Calendar) => Promise<T>): Promise<T> {
+  try {
+    return await run(calendar());
+  } catch (error) {
+    if (isAuthExpired(error)) throw new Error(RECONNECT_MESSAGE);
+    throw error;
+  }
 }
 
 export const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || 'primary';

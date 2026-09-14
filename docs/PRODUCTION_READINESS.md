@@ -55,15 +55,24 @@ What production needs instead:
 5. `invalid_grant` treated as "reconnect required" and surfaced to that user, rather than
    failing the run silently.
 
-### Publish the consent screen
+### The 7-day token, and why it is being lived with
 
 A consent screen left in **Testing** issues refresh tokens that expire after **exactly 7
-days**, after which every call returns `invalid_grant`. This is the cause of the repeated
-re-authorisation during single-user development, and it is fixed in the Cloud Console, not
-in code: set the publishing status to **In Production**.
+days**, after which every call returns `invalid_grant`.
 
-Verification (including a security review) is required above 100 users on sensitive scopes
-such as Calendar. Start that process early — it is measured in weeks, not days.
+Calendar is a **sensitive** scope, and for sensitive scopes moving to "In Production" does
+not lift that on its own — full verification, including a security review, is required.
+That is weeks of work and is deliberately deferred.
+
+**Until then the expiry is expected, roughly weekly, and handled rather than prevented:**
+`lib/google-auth-detect.ts` recognises it, calendar calls surface it as an instruction to
+re-run `npm run google:auth`, and both agents are told to say the calendar is unavailable
+rather than answer around it. The failure mode being avoided is the one already seen in
+production — the agent quietly skipping the calendar check and answering confidently
+anyway.
+
+Start verification before the first external user, not after. It gates the 100-user cap as
+well as the token lifetime.
 
 ## Everything else, roughly in order
 
