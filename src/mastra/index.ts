@@ -150,12 +150,23 @@ const NUDGER_ID = 'nudger';
 const findStored = (schedules: { id: string }[], slug: string) =>
   schedules.find((schedule) => schedule.id === slug || schedule.id.endsWith(`_${slug}`));
 
-// The check-ins used to run on the main agent. Anything still targeting it would keep
-// firing alongside the new ones — every check-in twice, the duplicate on the pricier
-// model — so retire those before reconciling.
+/**
+ * The standing check-ins used to run on the main agent. Any copy still targeting it would
+ * fire alongside the new one — every check-in twice, the duplicate on the pricier model.
+ *
+ * Only the four known check-ins are retired. The agent also creates *ad-hoc* schedules on
+ * itself through `start_schedule` when the owner asks for a one-off or recurring reminder
+ * ("remind me every Friday about X"), and those are the owner's data. An earlier version
+ * of this deleted everything bound to `agent` and would have silently destroyed them on
+ * the next boot.
+ */
+const checkInSlugs = new Set<string>(CHECK_INS.map((checkIn) => checkIn.id));
 for (const stale of await mastra.schedules.list({ agentId: 'agent' })) {
+  const slug = stale.id.replace(/^agent_/, '');
+  if (!checkInSlugs.has(slug)) continue;
+
   await mastra.schedules.delete(stale.id).catch((error) => {
-    mastra.getLogger().warn('Could not remove a schedule left on the old agent', {
+    mastra.getLogger().warn('Could not remove a check-in left on the old agent', {
       id: stale.id,
       error,
     });
