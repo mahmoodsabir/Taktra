@@ -10,6 +10,8 @@ import {
   updateEventTool,
 } from '../tools/calendar-tools';
 import { notifyTool } from '../tools/notify-tool';
+import { looksLikeCommitment } from '../lib/capture-audit';
+import { countAllTodos, recordCaptureMiss } from '../lib/todos';
 
 const timezone = process.env.TIMEZONE || 'UTC';
 
@@ -106,6 +108,39 @@ function explainFailure(error: Error): { markdown: string } {
   };
 }
 
+/**
+ * Run the turn, then check that an apparent commitment actually became one.
+ *
+ * The instructions require a todo_add for anything the owner asks to be remembered, but a
+ * prompt-level guarantee fails silently — twice already, with no trace left anywhere. This
+ * records suspected misses so the question "why did it not capture that?" has an answer.
+ *
+ * It deliberately never tells the owner. The heuristic over-reports by design, and an
+ * assistant that regularly announces it might have missed something is worse than one that
+ * occasionally does.
+ */
+async function auditCapture(
+  message: unknown,
+  run: () => Promise<unknown>,
+): Promise<void> {
+  const text =
+    message && typeof message === 'object' && 'text' in message
+      ? String((message as { text?: unknown }).text ?? '')
+      : '';
+
+  const suspect = looksLikeCommitment(text);
+  const before = suspect ? await countAllTodos().catch(() => -1) : -1;
+
+  await run();
+
+  if (!suspect || before < 0) return;
+  try {
+    if ((await countAllTodos()) === before) await recordCaptureMiss(text);
+  } catch {
+    // An audit failure must never surface as a failed turn; the reply already went out.
+  }
+}
+
 export const agent = new Agent({
   id: 'agent',
   name: 'Productivity Agent',
@@ -132,6 +167,8 @@ When something has a real time and place, it belongs on the calendar via calenda
 If a calendar tool reports that the authorisation has expired, say so plainly and relay what it says to do. Do not answer calendar questions from memory or from the task list while it is disconnected, and do not quietly skip the check: say the calendar is unavailable, then answer only what you actually know.
 
 Anything with a specific time also gets a calendar event with a reminderMinutes value set, even when it is a plain task rather than a meeting. Default to 15 minutes ahead, more when they need lead time to travel or prepare. Log the task as well, so it still shows up in check-ins and still has to be closed out.
+
+When a commitment repeats — "every Friday", "every morning", "remind me monthly" — set recurrence on the task itself and give it a dueAt for the first occurrence. Do not build a schedule for it with start_schedule. Marking it done rolls it forward on its own, so there is one thing to close out; a separate schedule would keep firing after the task was closed. Use start_schedule only for standing routines that are not about a specific commitment.
 
 When a task is emotionally or practically difficult, capture the minimum viable action too: a reduced version that still moves the task forward. This matters when the user is overloaded, lazy, distracted, or working on something else.
 
@@ -230,10 +267,10 @@ Ask a question only when the answer changes what you would do. Otherwise pick th
        * agent talking to them.
        */
       onDirectMessage: async (thread, message, defaultHandler) => {
-        await defaultHandler(thread, message);
+        await auditCapture(message, () => defaultHandler(thread, message));
       },
       onSubscribedMessage: async (thread, message, defaultHandler) => {
-        await defaultHandler(thread, message);
+        await auditCapture(message, () => defaultHandler(thread, message));
       },
       // Group mentions are never wanted here; this agent is single-user.
       onMention: false,

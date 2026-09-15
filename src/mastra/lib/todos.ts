@@ -12,6 +12,17 @@ import { createClient, type Client } from '@libsql/client';
  */
 export type TodoStatus = 'open' | 'blocked' | 'stalled' | 'note' | 'done' | 'dropped';
 export type TodoArea = 'personal' | 'work' | 'health' | 'family' | 'growth' | 'admin';
+
+/**
+ * How often a commitment comes back.
+ *
+ * Deliberately a small vocabulary rather than cron or RRULE. The owner says "every
+ * Friday", not "0 10 * * 5", and a recurring commitment is still one commitment — closing
+ * an occurrence rolls it to the next rather than ending it. The alternative in use before
+ * this was an ad-hoc schedule alongside a task, which left a live schedule firing forever
+ * once the task was closed.
+ */
+export type TodoRecurrence = 'daily' | 'weekly' | 'monthly';
 export type TodoPriority = 'low' | 'normal' | 'high';
 
 export interface Todo {
@@ -20,6 +31,7 @@ export interface Todo {
   notes: string | null;
   area: TodoArea;
   priority: TodoPriority;
+  recurrence: TodoRecurrence | null;
   status: TodoStatus;
   dueAt: string | null;
   snoozedUntil: string | null;
@@ -59,11 +71,25 @@ async function init(): Promise<void> {
         status_reason TEXT,
         minimum_viable_action TEXT,
         escalation_level INTEGER NOT NULL DEFAULT 0,
+        recurrence TEXT,
         created_at TEXT NOT NULL,
         completed_at TEXT
       )
     `)
     .then(async () => {
+      // A log of messages that looked like commitments but produced no task. Separate
+      // from `todos` on purpose: these are suspected failures, not commitments, and must
+      // never appear in anything the agent reads back to the owner as their list.
+      await db()
+        .execute(`
+          CREATE TABLE IF NOT EXISTS capture_misses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+          )
+        `)
+        .catch(() => undefined);
+
       // Legacy rows used `context` for the life area, which collided with both
       // "bounded context" and "context window". Renaming is a no-op once applied.
       await db().execute('ALTER TABLE todos RENAME COLUMN context TO area').catch(() => undefined);
@@ -74,6 +100,7 @@ async function init(): Promise<void> {
         'status_reason',
         'minimum_viable_action',
         'escalation_level',
+        'recurrence',
       ];
       for (const column of columnsToAdd) {
         await db()
@@ -91,6 +118,7 @@ function toTodo(row: any): Todo {
     title: String(row.title),
     notes: row.notes ?? null,
     area: row.area,
+    recurrence: row.recurrence ?? null,
     priority: row.priority,
     status: row.status,
     dueAt: row.due_at ?? null,
@@ -171,13 +199,14 @@ export async function addTodo(input: {
   notes?: string;
   area?: TodoArea;
   priority?: TodoPriority;
+  recurrence?: TodoRecurrence;
   dueAt?: string;
   minimumViableAction?: string;
 }): Promise<Todo> {
   await init();
   const result = await db().execute({
-    sql: `INSERT INTO todos (title, notes, area, priority, status, due_at, minimum_viable_action, created_at)
-          VALUES (?, ?, ?, ?, 'open', ?, ?, ?) RETURNING *`,
+    sql: `INSERT INTO todos (title, notes, area, priority, status, due_at, minimum_viable_action, recurrence, created_at)
+          VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?) RETURNING *`,
     args: [
       input.title,
       input.notes ?? null,
@@ -185,6 +214,7 @@ export async function addTodo(input: {
       input.priority ?? 'normal',
       input.dueAt ? toUtc(input.dueAt) : null,
       input.minimumViableAction ?? null,
+      input.recurrence ?? null,
       new Date().toISOString(),
     ],
   });
@@ -230,6 +260,42 @@ export async function listTodos(filter: {
   return result.rows.map(toTodo);
 }
 
+/**
+ * The next time a recurring commitment comes due, counted from its last due time.
+ *
+ * Advancing from the *due* time rather than from now keeps a weekly Friday task on
+ * Fridays even when it is closed out on the Sunday. If it has been missed for several
+ * cycles, it rolls forward until it is in the future, so a task neglected for a month
+ * comes back due next week rather than four times at once.
+ */
+export function nextOccurrence(
+  dueAt: string,
+  recurrence: TodoRecurrence,
+  now = new Date(),
+): string {
+  const next = new Date(dueAt);
+  if (Number.isNaN(next.getTime())) throw new Error(`Invalid dueAt: "${dueAt}"`);
+
+  const advance = () => {
+    if (recurrence === 'daily') next.setUTCDate(next.getUTCDate() + 1);
+    else if (recurrence === 'weekly') next.setUTCDate(next.getUTCDate() + 7);
+    else {
+      // Keep the day of month, but never roll a 31st into the 1st of the month after.
+      const day = next.getUTCDate();
+      next.setUTCDate(1);
+      next.setUTCMonth(next.getUTCMonth() + 1);
+      const lastDay = new Date(
+        Date.UTC(next.getUTCFullYear(), next.getUTCMonth() + 1, 0),
+      ).getUTCDate();
+      next.setUTCDate(Math.min(day, lastDay));
+    }
+  };
+
+  advance();
+  while (next.getTime() <= now.getTime()) advance();
+  return next.toISOString();
+}
+
 export async function updateTodo(
   id: number,
   patch: {
@@ -237,6 +303,7 @@ export async function updateTodo(
     notes?: string;
     area?: TodoArea;
     priority?: TodoPriority;
+    recurrence?: TodoRecurrence | null;
     status?: TodoStatus;
     dueAt?: string | null;
     snoozedUntil?: string | null;
@@ -257,6 +324,7 @@ export async function updateTodo(
   if (patch.title !== undefined) push('title', patch.title);
   if (patch.notes !== undefined) push('notes', patch.notes);
   if (patch.area !== undefined) push('area', patch.area);
+  if (patch.recurrence !== undefined) push('recurrence', patch.recurrence);
   if (patch.priority !== undefined) push('priority', patch.priority);
   if (patch.dueAt !== undefined) push('due_at', patch.dueAt === null ? null : toUtc(patch.dueAt));
   if (patch.snoozedUntil !== undefined)
@@ -272,8 +340,25 @@ export async function updateTodo(
     sets.push('nudged_for_due_at = due_at');
   }
   if (patch.status !== undefined) {
-    push('status', patch.status);
-    push('completed_at', patch.status === 'done' ? new Date().toISOString() : null);
+    /**
+     * A recurring commitment is one commitment, not a stream of them. Marking an
+     * occurrence done rolls it to the next due time and reopens it, so there is a single
+     * row to close out and no schedule left running once it is finally dropped.
+     *
+     * Only `done` rolls forward. `dropped` ends the commitment outright, which is how the
+     * owner stops a recurrence.
+     */
+    const current = await getTodo(id);
+    if (patch.status === 'done' && current?.recurrence && current.dueAt) {
+      push('status', 'open');
+      push('completed_at', null);
+      push('due_at', nextOccurrence(current.dueAt, current.recurrence));
+      // A fresh due time earns a fresh nudge.
+      sets.push('nudged_for_due_at = NULL');
+    } else {
+      push('status', patch.status);
+      push('completed_at', patch.status === 'done' ? new Date().toISOString() : null);
+    }
   }
 
   if (sets.length === 0) return getTodo(id);
@@ -346,4 +431,50 @@ export async function todosDueForNudge(withinMinutes = 15): Promise<Todo[]> {
       const level = computeEscalationLevel(todo, now);
       return level >= 1 || !!todo.dueAt && new Date(todo.dueAt) <= new Date(now.getTime() + withinMinutes * 60_000);
     });
+}
+
+/** How many commitments exist in total, used to detect a turn that captured nothing. */
+export async function countAllTodos(): Promise<number> {
+  await init();
+  const result = await db().execute('SELECT count(*) AS n FROM todos');
+  return Number((result.rows[0] as unknown as { n: number | bigint })?.n ?? 0);
+}
+
+/**
+ * Record a message that looked like a commitment but produced no task.
+ *
+ * Never surfaced to the owner in the moment — the heuristic is deliberately blunt and
+ * would be wrong often enough to be irritating. It exists so that "it did not capture
+ * that" is answerable afterwards instead of being invisible, which is how two real
+ * reminders were lost without either of us noticing.
+ */
+export async function recordCaptureMiss(message: string): Promise<void> {
+  await init();
+  await db().execute({
+    sql: 'INSERT INTO capture_misses (message, occurred_at) VALUES (?, ?)',
+    // Truncated: enough to recognise what was missed, without keeping a second copy of
+    // every long message the owner ever sent.
+    args: [message.slice(0, 500), new Date().toISOString()],
+  });
+}
+
+export interface CaptureMiss {
+  id: number;
+  message: string;
+  occurredAt: string;
+}
+
+/** Suspected missed captures, newest first. */
+export async function listCaptureMisses(limit = 50): Promise<CaptureMiss[]> {
+  await init();
+  const result = await db().execute({
+    sql: 'SELECT * FROM capture_misses ORDER BY id DESC LIMIT ?',
+    args: [limit],
+  });
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  return result.rows.map((row: any) => ({
+    id: Number(row.id),
+    message: String(row.message),
+    occurredAt: String(row.occurred_at),
+  }));
 }

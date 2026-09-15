@@ -5,6 +5,7 @@ import { addTodo, listTodos, updateTodo, type TodoArea, type TodoPriority } from
 const areaEnum = z.enum(['personal', 'work', 'health', 'family', 'growth', 'admin']);
 const priorityEnum = z.enum(['low', 'normal', 'high']);
 const statusEnum = z.enum(['open', 'blocked', 'stalled', 'note', 'done', 'dropped']);
+const recurrenceEnum = z.enum(['daily', 'weekly', 'monthly']);
 
 export const addTodoTool = createTool({
   id: 'todo_add',
@@ -19,18 +20,24 @@ export const addTodoTool = createTool({
       .string()
       .optional()
       .describe('ISO 8601 datetime the task is due. Omit if the user gave no deadline.'),
+    recurrence: recurrenceEnum
+      .optional()
+      .describe(
+        'Set when the commitment repeats — "every Friday" is weekly, "every morning" daily, "every month" monthly. Requires dueAt, which sets the first occurrence and the time of day. Marking it done rolls it to the next occurrence instead of closing it, so do not create a separate schedule for it.',
+      ),
     minimumViableAction: z
       .string()
       .optional()
       .describe('A reduced version of the task that can still move it forward when the user is overloaded, busy, or lazy.'),
   }),
-  execute: async ({ title, notes, area, priority, dueAt, minimumViableAction }) =>
+  execute: async ({ title, notes, area, priority, dueAt, recurrence, minimumViableAction }) =>
     addTodo({
       title,
       notes,
       area: area as TodoArea,
       priority: priority as TodoPriority,
       dueAt,
+      recurrence,
       minimumViableAction,
     }),
 });
@@ -65,10 +72,14 @@ export const updateTodoTool = createTool({
     notes: z.string().optional(),
     area: areaEnum.optional(),
     priority: priorityEnum.optional(),
+    recurrence: recurrenceEnum
+      .nullable()
+      .optional()
+      .describe('Make the commitment repeat, or null to stop it repeating.'),
     status: statusEnum
       .optional()
       .describe(
-        'Pick the one that matches who is holding it up. "blocked" = waiting on someone else, so the user cannot move it alone. "stalled" = stuck on the user themselves, through overwhelm, avoidance, or drift. "note" = a fact worth keeping that is not a commitment and must never be nudged. "done" when finished; "dropped" when abandoned.',
+        'Pick the one that matches who is holding it up. "blocked" = waiting on someone else, so the user cannot move it alone. "stalled" = stuck on the user themselves, through overwhelm, avoidance, or drift. "note" = a fact worth keeping that is not a commitment and must never be nudged. "done" when finished — on a recurring commitment this rolls it to the next occurrence rather than closing it. "dropped" when abandoned, which is how a recurring commitment is stopped for good.',
       ),
     dueAt: z.string().nullable().optional().describe('ISO 8601 datetime, or null to clear.'),
     snoozedUntil: z

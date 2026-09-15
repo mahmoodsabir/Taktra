@@ -113,3 +113,71 @@ test('a due task is nudged once per due time, and again when rescheduled', async
   await updateTodo(todo.id, { dueAt: new Date(Date.now() - 30_000).toISOString() });
   assert.equal((await todosDueForNudge()).some((t) => t.id === todo.id), true);
 });
+
+test('nextOccurrence advances from the due time, not from now', async () => {
+  const { nextOccurrence } = await import('./todos.ts');
+  const now = new Date('2026-09-20T12:00:00Z'); // a Sunday
+
+  // A Friday task closed out on Sunday stays on Fridays.
+  assert.equal(
+    nextOccurrence('2026-09-18T07:00:00Z', 'weekly', now),
+    '2026-09-25T07:00:00.000Z',
+  );
+  assert.equal(nextOccurrence('2026-09-20T06:00:00Z', 'daily', now), '2026-09-21T06:00:00.000Z');
+  assert.equal(nextOccurrence('2026-09-15T09:00:00Z', 'monthly', now), '2026-10-15T09:00:00.000Z');
+});
+
+test('a long-neglected recurring task comes back once, not once per missed cycle', async () => {
+  const { nextOccurrence } = await import('./todos.ts');
+  const now = new Date('2026-09-20T12:00:00Z');
+
+  // Six weeks untouched. It should land on the next future Friday, not replay the backlog.
+  const next = nextOccurrence('2026-08-07T07:00:00Z', 'weekly', now);
+  assert.ok(new Date(next) > now, 'must be in the future');
+  assert.equal(next, '2026-09-25T07:00:00.000Z');
+});
+
+test('monthly recurrence never slides a late-month day into the next month', async () => {
+  const { nextOccurrence } = await import('./todos.ts');
+  // The 31st of January has no equivalent in February; it must clamp, not overflow to March.
+  const next = nextOccurrence('2027-01-31T09:00:00Z', 'monthly', new Date('2027-01-31T10:00:00Z'));
+  assert.equal(next, '2027-02-28T09:00:00.000Z');
+});
+
+test('completing a recurring commitment reopens it at the next due time', async () => {
+  const todo = await addTodo({
+    title: 'pay-the-rent',
+    area: 'admin',
+    recurrence: 'monthly',
+    dueAt: new Date(Date.now() - 60_000).toISOString(),
+  });
+  assert.equal(todo.recurrence, 'monthly');
+
+  const after = await updateTodo(todo.id, { status: 'done' });
+
+  assert.equal(after?.status, 'open', 'a recurring commitment does not close');
+  assert.ok(new Date(after!.dueAt!) > new Date(), 'it rolls to the next occurrence');
+  assert.equal(after?.completedAt, null);
+
+  // The new due time earns a fresh nudge rather than inheriting the old one.
+  assert.equal((await todosDueForNudge()).some((t) => t.id === todo.id), false);
+});
+
+test('dropping a recurring commitment actually ends it', async () => {
+  const todo = await addTodo({
+    title: 'stop-this-one',
+    area: 'personal',
+    recurrence: 'weekly',
+    dueAt: new Date(Date.now() - 60_000).toISOString(),
+  });
+
+  const after = await updateTodo(todo.id, { status: 'dropped' });
+  assert.equal(after?.status, 'dropped', 'dropped is how a recurrence is ended');
+});
+
+test('a non-recurring task still closes normally', async () => {
+  const todo = await addTodo({ title: 'one-off', area: 'work' });
+  const after = await updateTodo(todo.id, { status: 'done' });
+  assert.equal(after?.status, 'done');
+  assert.ok(after?.completedAt);
+});

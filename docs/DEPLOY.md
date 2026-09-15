@@ -121,6 +121,39 @@ docker compose start taktra
 
 Or simply tell the bot that the calendar is reconnected and to correct its working memory.
 
+## Backups
+
+Everything the product knows lives in one volume: commitments, schedules, and months of
+accumulated memory about its owner. Losing it loses the product.
+
+```bash
+scripts/backup.sh /var/backups/taktra
+```
+
+Nightly, via the host's crontab:
+
+```cron
+15 3 * * *  /root/Taktra/scripts/backup.sh /var/backups/taktra >> /var/log/taktra-backup.log 2>&1
+```
+
+It archives the whole `/data` directory rather than just `mastra.db`, because SQLite holds
+recent writes in the `-wal` until a checkpoint. The container keeps running — this is a
+crash-consistent copy, which the WAL is designed to recover from, and stopping the service
+nightly would cost missed reminders for nothing. Archives older than 14 days are pruned
+(`TAKTRA_BACKUP_KEEP_DAYS`).
+
+To restore:
+
+```bash
+docker compose stop taktra
+docker run --rm -v taktra-data:/data -v /var/backups/taktra:/backup alpine:3 \
+  sh -c 'rm -rf /data/* && tar xzf /backup/taktra-<stamp>.tar.gz -C /data'
+docker compose start taktra
+```
+
+**A backup nobody has restored is a hope, not a backup.** Run the restore into a throwaway
+volume once, and confirm the agent still knows who you are.
+
 ## Migrations
 
 Schema changes apply themselves on boot and are written to be no-ops once applied, so an
