@@ -42,3 +42,34 @@ test('speech is recognised however the platform labels it', async () => {
   assert.equal(isAudio(null), false);
   assert.equal(isAudio(undefined), false);
 });
+
+test('audio is recognised from the type field adapters actually send', async () => {
+  const { isAudio: audio } = await import('./transcribe.ts');
+  // The delivered shape carries a type; requiring a mime type missed every voice note.
+  assert.ok(audio({ type: 'audio' }));
+  assert.ok(audio({ type: 'voice_note' }));
+  assert.equal(audio({ type: 'image' }), false);
+});
+
+test('bytes are read however the adapter chose to provide them', async () => {
+  const { attachmentBytes } = await import('./transcribe.ts');
+  const bytes = new Uint8Array([1, 2, 3]).buffer;
+
+  assert.equal(await attachmentBytes({ data: bytes }), bytes, 'inline data');
+  assert.equal(await attachmentBytes({ fetchData: async () => bytes }), bytes, 'a fetcher');
+
+  // Requiring any single one of these is how the first version failed on every note.
+  await assert.rejects(() => attachmentBytes({}), /no data/);
+});
+
+test('a fetcher that returns nothing falls through rather than throwing early', async () => {
+  const { attachmentBytes } = await import('./transcribe.ts');
+  const bytes = new Uint8Array([9]).buffer;
+  // Present but empty is a real adapter behaviour; the url is still worth trying.
+  const result = await attachmentBytes({
+    fetchData: async () => undefined as never,
+    url: 'data:,',
+  }).catch(() => 'threw');
+  assert.notEqual(result, 'threw', 'it should try the url before giving up');
+  void bytes;
+});

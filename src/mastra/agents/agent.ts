@@ -12,7 +12,7 @@ import {
 import { notifyTool } from '../tools/notify-tool';
 import { notifyOwner } from '../lib/notify';
 import { looksLikeCommitment } from '../lib/capture-audit';
-import { isAudio, transcribe } from '../lib/transcribe.ts';
+import { attachmentBytes, isAudio, transcribe } from '../lib/transcribe.ts';
 import { countAllTodos, recordCaptureMiss } from '../lib/todos';
 import { findUserByChannel, OWNER_USER_ID, resourceForUser, type ChannelKind } from '../lib/users.ts';
 
@@ -162,24 +162,45 @@ async function withVoiceTranscript<T extends { text?: unknown; attachments?: unk
 ): Promise<{ message: T; failure?: string }> {
   const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
   const voice = attachments.find((a) => isAudio(a as { mimeType?: string; name?: string })) as
-    | { mimeType?: string; name?: string; data?: unknown; fetchData?: () => Promise<ArrayBuffer | Buffer> }
+    | {
+        type?: string;
+        mimeType?: string;
+        name?: string;
+        url?: string;
+        data?: unknown;
+        fetchData?: () => Promise<ArrayBuffer | Buffer>;
+      }
     | undefined;
 
   if (!voice) return { message };
 
   try {
-    const audio = voice.data ?? (await voice.fetchData?.());
-    if (!audio) throw new Error('No audio data on the attachment');
-
-    const { text } = await transcribe({
-      audio: audio as ArrayBuffer | Buffer,
-      mimeType: voice.mimeType,
-    });
+    const audio = await attachmentBytes(voice);
+    const { text } = await transcribe({ audio, mimeType: voice.mimeType });
 
     // Any caption the user typed alongside the note is kept; it is usually the correction.
     const caption = String(message.text ?? '').trim();
     return { message: { ...message, text: caption ? `${caption}\n${text}` : text } };
   } catch (error) {
+    /**
+     * Logged with the attachment's shape, not just the message.
+     *
+     * The first version swallowed this entirely, so a voice note that never transcribed
+     * was indistinguishable from one that was not understood — and there was nothing to
+     * debug from. Which fields an adapter actually populates is the thing worth knowing.
+     */
+    console.error('[voice] transcription failed', {
+      error: error instanceof Error ? error.message : String(error),
+      attachment: {
+        type: (voice as { type?: string }).type,
+        mimeType: voice.mimeType,
+        name: voice.name,
+        hasData: Boolean(voice.data),
+        hasFetchData: typeof voice.fetchData === 'function',
+        hasUrl: Boolean((voice as { url?: string }).url),
+      },
+    });
+
     return {
       message,
       failure:

@@ -75,11 +75,45 @@ export function filenameFor(mimeType?: string, fallback = 'voice.ogg'): string {
  * Telegram labels a held-to-record note `voice_note` and an attached file `audio`; both
  * are speech worth reading. Anything else is left alone.
  */
-export function isAudio(attachment: { mimeType?: string; name?: string } | null | undefined): boolean {
+export function isAudio(
+  attachment: { type?: string; mimeType?: string; name?: string } | null | undefined,
+): boolean {
   if (!attachment) return false;
+  // Adapters vary in what they populate: a type, a mime type, or only a filename.
+  if (attachment.type === 'audio' || attachment.type === 'voice_note') return true;
   const mime = attachment.mimeType?.toLowerCase() ?? '';
   if (mime.startsWith('audio/')) return true;
   return /\.(ogg|oga|opus|mp3|m4a|wav|webm)$/i.test(attachment.name ?? '');
+}
+
+/**
+ * Get the bytes out of an attachment, however this adapter chose to provide them.
+ *
+ * Some deliver the data inline, some a `fetchData` that handles auth, and some only a
+ * URL. Requiring any one of those is how the first version of this silently failed on
+ * every voice note.
+ */
+export async function attachmentBytes(attachment: {
+  data?: unknown;
+  fetchData?: () => Promise<ArrayBuffer | Buffer>;
+  url?: string;
+}): Promise<ArrayBuffer | Buffer> {
+  if (attachment.data) return attachment.data as ArrayBuffer | Buffer;
+
+  if (typeof attachment.fetchData === 'function') {
+    const fetched = await attachment.fetchData();
+    if (fetched) return fetched;
+  }
+
+  if (attachment.url) {
+    const response = await fetch(attachment.url);
+    if (!response.ok) {
+      throw new Error(`Could not download the attachment: ${response.status}`);
+    }
+    return await response.arrayBuffer();
+  }
+
+  throw new Error('Attachment carried no data, no fetchData and no url');
 }
 
 async function toBlob(audio: ArrayBuffer | Buffer, mimeType: string): Promise<Blob> {
