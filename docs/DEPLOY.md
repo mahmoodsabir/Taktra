@@ -40,6 +40,58 @@ not. `.env.example` is the reference.
 **`TELEGRAM_ALLOWED_USER_IDS` must never be blank in a deployed instance.** Empty means
 every Telegram user is allowed, and a bot username is discoverable.
 
+## Reconnecting Google Calendar
+
+The refresh token expires every 7 days while the consent screen is unverified, so this is
+a weekly chore. The callback is `http://localhost:5858/oauth2callback`, which needs a
+browser — so forward the port rather than trying to run one on the server:
+
+```bash
+ssh -L 5858:localhost:5858 root@<vps>
+cd /root/Taktra && npm run google:auth      # open the printed URL in your own browser
+# paste the new GOOGLE_REFRESH_TOKEN into /root/Taktra/.env
+systemctl restart taktra
+```
+
+**Mint the token on the machine that will use it.** A refresh token only works with the
+exact client id and secret that issued it, so one generated on a laptop against different
+credentials fails on the server with `invalid_grant`.
+
+Verify the token itself before suspecting the app:
+
+```bash
+set -a; . /root/Taktra/.env; set +a
+curl -s https://oauth2.googleapis.com/token \
+  -d client_id="$GOOGLE_CLIENT_ID" -d client_secret="$GOOGLE_CLIENT_SECRET" \
+  -d refresh_token="$GOOGLE_REFRESH_TOKEN" -d grant_type=refresh_token
+```
+
+`access_token` means the credentials are good and the fault is elsewhere. `invalid_grant`
+means the token is dead or was minted against a different client.
+
+### If it still claims to be disconnected after a good token
+
+Check working memory, not the token:
+
+```bash
+sqlite3 /root/Taktra/mastra.db \
+  "SELECT workingMemory FROM mastra_resources WHERE id='agent';" | grep -i "calendar authoriz"
+```
+
+The agent has previously written an outage into working memory, which is replayed into
+every later prompt — so it kept reporting a disconnected calendar long after the token was
+replaced. The instructions now forbid recording integration state there, but an existing
+entry has to be removed by hand:
+
+```bash
+systemctl stop taktra
+sqlite3 /root/Taktra/mastra.db \
+  "UPDATE mastra_resources SET workingMemory = replace(workingMemory, '<the stale sentence>', '') WHERE id='agent';"
+systemctl start taktra
+```
+
+Or simply tell the bot that the calendar is reconnected and to correct its working memory.
+
 ## Migrations
 
 Schema changes apply themselves on boot and are written to be no-ops once applied, so an
