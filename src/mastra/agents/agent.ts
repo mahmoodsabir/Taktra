@@ -10,7 +10,6 @@ import {
   updateEventTool,
 } from '../tools/calendar-tools';
 import { notifyTool } from '../tools/notify-tool';
-import { notifyOwner } from '../lib/notify';
 
 const timezone = process.env.TIMEZONE || 'UTC';
 
@@ -83,34 +82,28 @@ export const sharedMemory = new Memory({
 /**
  * Turn a crash into a sentence the owner can act on.
  *
- * Without this the raw failure is what lands in the chat — "You have no credits
- * remaining", "read ETIMEDOUT" — which reads as the agent breaking rather than telling
- * them something. Worse, a silent failure looks exactly like being ignored, and an
- * accountability agent that appears to ignore you is worse than no agent.
+ * The adapter otherwise posts `❌ Error: <message>` verbatim, so the owner has seen raw
+ * text like "You have no credits remaining" and "read ETIMEDOUT". That reads as the agent
+ * breaking rather than telling them something, and worse, it never says whether what they
+ * just sent was kept.
  */
-async function handleOrApologize<TThread, TMessage>(
-  thread: TThread,
-  message: TMessage,
-  defaultHandler: (thread: TThread, message: TMessage) => Promise<unknown>,
-): Promise<void> {
-  try {
-    await defaultHandler(thread, message);
-    return;
-  } catch (error) {
-    const text = error instanceof Error ? error.message : String(error);
-    const explain = /credit|quota|billing|insufficient/i.test(text)
-      ? "I'm out of API credit, so I can't think right now. Top it up and say that again — I have not saved this one."
-      : /timeout|etimedout|econnreset|fetch failed|network/i.test(text)
-        ? "I couldn't reach the model just then. Say that again in a moment — I have not saved this one."
-        : "Something broke on my side and I could not process that. It is not saved, so please send it again.";
-
-    try {
-      await notifyOwner(explain);
-    } catch {
-      // Telegram is down too. Nothing left to do but leave it in the logs.
-    }
-    throw error;
+function explainFailure(error: Error): { markdown: string } {
+  const text = error.message ?? '';
+  if (/credit|quota|billing|insufficient/i.test(text)) {
+    return {
+      markdown:
+        "I'm out of API credit, so I can't think right now. Top it up and send that again — I have not saved this one.",
+    };
   }
+  if (/timeout|etimedout|econnreset|fetch failed|network|unreachable/i.test(text)) {
+    return {
+      markdown:
+        "I couldn't reach the model just then. Send that again in a moment — I have not saved this one.",
+    };
+  }
+  return {
+    markdown: 'Something broke on my side and I could not process that. It is not saved, so please send it again.',
+  };
 }
 
 export const agent = new Agent({
@@ -201,7 +194,24 @@ Ask a question only when the answer changes what you would do. Otherwise pick th
     adapters: {
       // Registered only once a bot token exists, so an unconfigured Telegram is absent
       // rather than broken.
-      ...(telegramAdapter ? { telegram: telegramAdapter } : {}),
+      ...(telegramAdapter
+        ? {
+            telegram: {
+              adapter: telegramAdapter,
+              /**
+               * Run tools silently.
+               *
+               * The default posts a card per tool call with its raw JSON result, so a
+               * simple question filled the chat with `{"count": 0, "todos": []}` blocks
+               * before the actual answer. This is a chat with an assistant, not a trace
+               * viewer — the owner wants the reply, and the typing indicator is enough to
+               * show something is happening.
+               */
+              toolDisplay: 'hidden' as const,
+              formatError: explainFailure,
+            },
+          }
+        : {}),
     },
     /**
      * Channel threads default to a per-platform resourceId. Pinning every channel to
@@ -220,10 +230,10 @@ Ask a question only when the answer changes what you would do. Otherwise pick th
        * agent talking to them.
        */
       onDirectMessage: async (thread, message, defaultHandler) => {
-        await handleOrApologize(thread, message, defaultHandler);
+        await defaultHandler(thread, message);
       },
       onSubscribedMessage: async (thread, message, defaultHandler) => {
-        await handleOrApologize(thread, message, defaultHandler);
+        await defaultHandler(thread, message);
       },
       // Group mentions are never wanted here; this agent is single-user.
       onMention: false,
