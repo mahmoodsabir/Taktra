@@ -49,7 +49,7 @@ export function configuredProvider(env: NodeJS.ProcessEnv = process.env): Transc
 export function modelFor(provider: TranscriptionProvider, env: NodeJS.ProcessEnv = process.env): string {
   return provider === 'local'
     ? env.WHISPER_MODEL || 'whisper-local'
-    : env.TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe';
+    : env.TRANSCRIBE_MODEL || 'whisper-1';
 }
 
 /** A filename the provider can infer a codec from. Telegram voice notes are Opus in Ogg. */
@@ -116,6 +116,18 @@ export async function attachmentBytes(attachment: {
   throw new Error('Attachment carried no data, no fetchData and no url');
 }
 
+/**
+ * The richest response format this model actually accepts.
+ *
+ * Whisper reports the clip's duration under `verbose_json`, which is what per-account cost
+ * accounting is priced on. The newer transcribe models reject that format outright — a 400
+ * that failed every voice note — so they get plain `json` and their duration is simply
+ * unknown rather than fatal.
+ */
+export function responseFormatFor(model: string): 'verbose_json' | 'json' {
+  return /whisper/i.test(model) ? 'verbose_json' : 'json';
+}
+
 async function toBlob(audio: ArrayBuffer | Buffer, mimeType: string): Promise<Blob> {
   const view = audio instanceof ArrayBuffer ? new Uint8Array(audio) : new Uint8Array(audio);
   return new Blob([view], { type: mimeType });
@@ -148,11 +160,12 @@ export async function transcribe(
     throw new TranscriptionError('OPENAI_API_KEY is not set', provider);
   }
 
+  const requestedModel = provider === 'local' ? env.WHISPER_MODEL || 'whisper-1' : model;
+
   const form = new FormData();
   form.append('file', await toBlob(request.audio, mimeType), request.filename ?? filenameFor(mimeType));
-  form.append('model', provider === 'local' ? env.WHISPER_MODEL || 'whisper-1' : model);
-  // Verbose JSON carries the duration, which is what per-account cost accounting needs.
-  form.append('response_format', 'verbose_json');
+  form.append('model', requestedModel);
+  form.append('response_format', responseFormatFor(requestedModel));
 
   const response = await fetch(endpoint, {
     method: 'POST',

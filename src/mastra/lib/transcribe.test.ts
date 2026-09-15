@@ -17,9 +17,19 @@ test('self-hosted is used when one is actually configured, not merely preferred'
 });
 
 test('each provider reports the model it used, so spend can be attributed', async () => {
-  assert.equal(modelFor('openai', {} as never), 'gpt-4o-mini-transcribe');
+  assert.equal(modelFor('openai', {} as never), 'whisper-1');
   assert.equal(modelFor('local', {} as never), 'whisper-local');
-  assert.equal(modelFor('openai', { TRANSCRIBE_MODEL: 'whisper' } as never), 'whisper');
+  assert.equal(modelFor('openai', { TRANSCRIBE_MODEL: 'gpt-4o-mini-transcribe' } as never), 'gpt-4o-mini-transcribe');
+});
+
+test('the response format matches what each model actually accepts', async () => {
+  const { responseFormatFor } = await import('./transcribe.ts');
+  // Asking gpt-4o-mini-transcribe for verbose_json returns a 400 and fails every note.
+  assert.equal(responseFormatFor('gpt-4o-mini-transcribe'), 'json');
+  assert.equal(responseFormatFor('gpt-4o-transcribe'), 'json');
+  // Whisper accepts it, and it is the only way to learn the clip duration for costing.
+  assert.equal(responseFormatFor('whisper-1'), 'verbose_json');
+  assert.equal(responseFormatFor('whisper-local'), 'verbose_json');
 });
 
 test('a Telegram voice note keeps an extension the codec can be read from', async () => {

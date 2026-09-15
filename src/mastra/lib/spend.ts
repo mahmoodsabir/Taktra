@@ -31,6 +31,7 @@ export const MODEL_RATES: Record<string, ModelRate> = {
 export const TRANSCRIPTION_RATES: Record<string, number> = {
   'gpt-4o-mini-transcribe': 0.003,
   'gpt-4o-transcribe': 0.006,
+  'whisper-1': 0.006,
   whisper: 0.006,
   /** Self-hosted: no marginal cost, though the host is not free. */
   'whisper-local': 0,
