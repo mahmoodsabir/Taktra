@@ -1,0 +1,25 @@
+# Never bake secrets or state into an image layer.
+.env
+.env.*
+!.env.example
+mastra.db
+mastra.db-*
+mastra.db.bak
+*.duckdb
+*.duckdb.wal
+auth_info/
+
+# Rebuilt inside the image. Copying these in would ship native modules built for the
+# host's platform, which is the drift containerising this is meant to end.
+node_modules/
+.mastra/
+
+.git/
+.github/
+.claude/
+docs/
+*.md
+!README.md
+.DS_Store
+.vscode/
+.idea/

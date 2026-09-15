@@ -52,7 +52,15 @@ This guide should be updated whenever the product, reminder policy, or task mode
 
 ## Get started
 
-Full setup — Telegram bot, Google Calendar, allowlist — is in [SETUP.md](SETUP.md).
+Full setup — Telegram bot, Google Calendar, allowlist — is in [SETUP.md](SETUP.md), and
+[docs/DEPLOY.md](docs/DEPLOY.md) covers running it in Docker.
+
+With Docker, the whole thing is:
+
+```shell
+cp .env.example .env    # fill in the real values
+docker compose up -d --build
+```
 
 The short version: copy `.env.example` to `.env`, fill in `OPENAI_API_KEY`,
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`, and `TELEGRAM_OWNER_CHAT_ID`, then run:

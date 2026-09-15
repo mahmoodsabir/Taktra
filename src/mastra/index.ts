@@ -50,7 +50,20 @@ export const mastra = new Mastra({
       authToken: process.env.TURSO_AUTH_TOKEN || undefined,
     }),
     domains: {
-      observability: await new DuckDBStore().getStore('observability'),
+      /**
+       * Both stores take an absolute path in a container, pointing at a mounted volume.
+       *
+       * Their defaults are relative, and a relative path resolves against the bundle's
+       * working directory rather than the project root — so the databases land inside
+       * `.mastra/output`, which `npm run build` empties. That silently destroyed state on
+       * every deploy. Keep these absolute anywhere the data is meant to survive.
+       */
+      observability: await new DuckDBStore({
+        path: process.env.DUCKDB_PATH || 'mastra.duckdb',
+        // DuckDB otherwise claims 80% of system RAM, which is far too much for a store
+        // embedded in an app server sharing a small VPS with everything else.
+        memoryLimit: process.env.DUCKDB_MEMORY_LIMIT || '512MB',
+      }).getStore('observability'),
     },
   }),
   schedules: {

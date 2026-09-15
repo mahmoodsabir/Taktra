@@ -1,0 +1,49 @@
+services:
+  taktra:
+    build:
+      context: .
+      args:
+        NODE_VERSION: 22-slim
+    image: taktra:latest
+    container_name: taktra
+    restart: unless-stopped
+
+    # Secrets and settings come from .env, which is never baked into the image.
+    env_file:
+      - .env
+
+    # These win over anything in .env, on purpose. Both databases must sit on the
+    # mounted volume: a relative path resolves against the bundle directory, which a
+    # rebuild replaces, and that silently destroyed state on every deploy.
+    environment:
+      TURSO_DATABASE_URL: file:/data/mastra.db
+      DUCKDB_PATH: /data/mastra.duckdb
+      PORT: 4111
+      # Container clock, so log timestamps match the timezone the agent reasons in.
+      TZ: ${TIMEZONE:-UTC}
+
+    volumes:
+      - taktra-data:/data
+
+    # Studio and the API are unauthenticated. Bound to loopback so they are reachable
+    # only through an SSH tunnel:  ssh -L 4111:localhost:4111 <host>
+    ports:
+      - "127.0.0.1:4111:4111"
+
+    # Telegram allows one long-polling consumer per bot. A second replica would take
+    # turns being disconnected with 409s, and both would run the cron check-ins, so
+    # every reminder would arrive twice. Never scale this service.
+    deploy:
+      replicas: 1
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    stop_grace_period: 30s
+
+volumes:
+  taktra-data:
+    name: taktra-data
