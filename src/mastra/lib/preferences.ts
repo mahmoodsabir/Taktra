@@ -38,6 +38,12 @@ export interface Preferences {
   quietStart: string;
   quietEnd: string;
   maxNudgesPerDay: number;
+  /**
+   * Minutes before a timed commitment to warn, largest first — the same shape a calendar
+   * app offers. A commitment with a real time deserves lead time, not one ping as it
+   * starts, because by then it is already too late to travel or prepare.
+   */
+  reminderLeadMinutes: number[];
 }
 
 /**
@@ -53,6 +59,9 @@ export const HARD_LIMITS = {
   /** Never two unprompted messages closer together than this. */
   minGapHours: 4,
   personaNameMaxLength: 24,
+  /** More than this and the warnings themselves become the interruption. */
+  maxReminderLeads: 4,
+  maxLeadMinutes: 7 * 24 * 60,
 } as const;
 
 /** What each intensity means in hours between chases. */
@@ -72,6 +81,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   quietStart: '22:00',
   quietEnd: '07:00',
   maxNudgesPerDay: 4,
+  reminderLeadMinutes: [60, 15, 1],
 };
 
 const TIME = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -102,6 +112,45 @@ function cleanName(value: unknown, fallback: string | null): string | null {
     .trim()
     .slice(0, HARD_LIMITS.personaNameMaxLength);
   return cleaned.length > 0 ? cleaned : null;
+}
+
+/**
+ * Sort, de-duplicate and bound the lead times.
+ *
+ * Largest first so a warning is never delivered out of order, and de-duplicated because
+ * two reminders at the same offset is two notifications for one event.
+ */
+function cleanLeads(value: unknown, fallback: number[]): number[] {
+  if (!Array.isArray(value)) return fallback;
+  const cleaned = [
+    ...new Set(
+      value
+        .map((v) => (typeof v === 'number' ? Math.round(v) : Number.NaN))
+        .filter((v) => Number.isFinite(v) && v >= 0 && v <= HARD_LIMITS.maxLeadMinutes),
+    ),
+  ].sort((a, b) => b - a);
+  return cleaned.length > 0 ? cleaned.slice(0, HARD_LIMITS.maxReminderLeads) : fallback;
+}
+
+/**
+ * Which warnings are now due for a commitment, given what has already been sent.
+ *
+ * Returns the single most urgent outstanding lead rather than every one that has elapsed,
+ * so a commitment whose hour-before warning was missed gets one message about it rather
+ * than three in a row.
+ */
+export function dueReminderLead(
+  dueAt: Date,
+  leads: number[],
+  alreadySent: number[],
+  now = new Date(),
+): number | null {
+  const minutesUntil = (dueAt.getTime() - now.getTime()) / 60_000;
+  const outstanding = leads
+    .filter((lead) => !alreadySent.includes(lead))
+    .filter((lead) => minutesUntil <= lead)
+    .sort((a, b) => a - b);
+  return outstanding[0] ?? null;
 }
 
 export interface ClampResult {
@@ -153,6 +202,16 @@ export function clampPreferences(
     base.personaName,
   );
 
+  const leads = cleanLeads(requested.reminderLeadMinutes, base.reminderLeadMinutes);
+  if (
+    Array.isArray(requested.reminderLeadMinutes) &&
+    requested.reminderLeadMinutes.length > HARD_LIMITS.maxReminderLeads
+  ) {
+    adjustments.push(
+      `Kept the ${HARD_LIMITS.maxReminderLeads} most useful reminders — more than that and the warnings become the interruption.`,
+    );
+  }
+
   return {
     preferences: {
       intensity,
@@ -164,6 +223,7 @@ export function clampPreferences(
       quietStart: cleanTime(requested.quietStart, base.quietStart) ?? base.quietStart,
       quietEnd: cleanTime(requested.quietEnd, base.quietEnd) ?? base.quietEnd,
       maxNudgesPerDay,
+      reminderLeadMinutes: leads,
     },
     adjustments,
   };

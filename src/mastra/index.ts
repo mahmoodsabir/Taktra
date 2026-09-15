@@ -147,7 +147,16 @@ const CHECK_INS = [
   },
   {
     id: DUE_SWEEP_ID,
-    cron: '*/15 * * * *',
+    /**
+     * Every minute, not every quarter hour.
+     *
+     * A commitment with a real time earns lead warnings the way a calendar invite does —
+     * an hour out, a quarter hour out, and as it starts — and a sweep that only wakes four
+     * times an hour cannot deliver the last of those. The cost of the change is a database
+     * query a minute: the prepare hook below returns null when nothing is due, which skips
+     * the fire before any model call, so an idle minute is free.
+     */
+    cron: '* * * * *',
     prompt: 'Placeholder — the prepare hook supplies the real prompt, or skips the fire.',
   },
   {

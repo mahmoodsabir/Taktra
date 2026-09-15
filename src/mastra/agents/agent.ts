@@ -10,7 +10,9 @@ import {
   updateEventTool,
 } from '../tools/calendar-tools';
 import { notifyTool } from '../tools/notify-tool';
+import { notifyOwner } from '../lib/notify';
 import { looksLikeCommitment } from '../lib/capture-audit';
+import { isAudio, transcribe } from '../lib/transcribe.ts';
 import { countAllTodos, recordCaptureMiss } from '../lib/todos';
 import { findUserByChannel, OWNER_USER_ID, resourceForUser, type ChannelKind } from '../lib/users.ts';
 
@@ -143,6 +145,46 @@ async function auditCapture(
     if ((await countAllTodos(userId)) === before) await recordCaptureMiss(text);
   } catch {
     // An audit failure must never surface as a failed turn; the reply already went out.
+  }
+}
+
+/**
+ * Replace a voice note with what was said.
+ *
+ * Speaking is the lowest-friction way to capture a commitment — the moment someone
+ * remembers something is rarely a moment they can type — so this is a capture path, and it
+ * inherits capture's rule: never fail silently. A note that cannot be transcribed is
+ * answered with a sentence saying so, because the alternative is the owner believing they
+ * logged something that was never heard.
+ */
+async function withVoiceTranscript<T extends { text?: unknown; attachments?: unknown }>(
+  message: T,
+): Promise<{ message: T; failure?: string }> {
+  const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+  const voice = attachments.find((a) => isAudio(a as { mimeType?: string; name?: string })) as
+    | { mimeType?: string; name?: string; data?: unknown; fetchData?: () => Promise<ArrayBuffer | Buffer> }
+    | undefined;
+
+  if (!voice) return { message };
+
+  try {
+    const audio = voice.data ?? (await voice.fetchData?.());
+    if (!audio) throw new Error('No audio data on the attachment');
+
+    const { text } = await transcribe({
+      audio: audio as ArrayBuffer | Buffer,
+      mimeType: voice.mimeType,
+    });
+
+    // Any caption the user typed alongside the note is kept; it is usually the correction.
+    const caption = String(message.text ?? '').trim();
+    return { message: { ...message, text: caption ? `${caption}\n${text}` : text } };
+  } catch (error) {
+    return {
+      message,
+      failure:
+        "I couldn't make out that voice note — could you send it again, or type it? I haven't saved anything from it.",
+    };
   }
 }
 
@@ -283,10 +325,20 @@ Ask a question only when the answer changes what you would do. Otherwise pick th
        * agent talking to them.
        */
       onDirectMessage: async (thread, message, defaultHandler) => {
-        await auditCapture('telegram', message, () => defaultHandler(thread, message));
+        const { message: heard, failure } = await withVoiceTranscript(message);
+        if (failure) {
+          await notifyOwner(failure).catch(() => undefined);
+          return;
+        }
+        await auditCapture('telegram', heard, () => defaultHandler(thread, heard));
       },
       onSubscribedMessage: async (thread, message, defaultHandler) => {
-        await auditCapture('telegram', message, () => defaultHandler(thread, message));
+        const { message: heard, failure } = await withVoiceTranscript(message);
+        if (failure) {
+          await notifyOwner(failure).catch(() => undefined);
+          return;
+        }
+        await auditCapture('telegram', heard, () => defaultHandler(thread, heard));
       },
       // Group mentions are never wanted here; this agent is single-user.
       onMention: false,
