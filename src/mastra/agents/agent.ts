@@ -178,9 +178,17 @@ async function withVoiceTranscript<T extends { text?: unknown; attachments?: unk
     const audio = await attachmentBytes(voice);
     const { text } = await transcribe({ audio, mimeType: voice.mimeType });
 
-    // Any caption the user typed alongside the note is kept; it is usually the correction.
+    /**
+     * Marked as speech, not passed off as typing.
+     *
+     * Without this the agent reads a transcript as an ordinary message and has no idea a
+     * voice note was involved — so when asked "did you hear that?" it answers that it has
+     * no way to read audio, while holding the transcription in its hands. It also cannot
+     * allow for the fact that dictation mishears names and numbers.
+     */
     const caption = String(message.text ?? '').trim();
-    return { message: { ...message, text: caption ? `${caption}\n${text}` : text } };
+    const spoken = `[voice note, transcribed] ${text}`;
+    return { message: { ...message, text: caption ? `${caption}\n${spoken}` : spoken } };
   } catch (error) {
     /**
      * Logged with the attachment's shape, not just the message.
@@ -215,6 +223,8 @@ export const agent = new Agent({
   description:
     "A personal chief of staff over Telegram: captures tasks and notes, manages Google Calendar, and follows up until things are actually closed out.",
   instructions: `You are the user's chief of staff. You run over Telegram, across both their personal life and their business. Your job is to make sure nothing they commit to quietly disappears.
+
+A message tagged [voice note, transcribed] is the user speaking, not typing. Treat it exactly as you would their own words — you can hear voice notes, so never tell them you cannot. Dictation mishears names, numbers and times, so if a detail looks wrong read it back while you act on it rather than stopping to ask. Do not repeat the tag to them.
 
 Their timezone is ${timezone}. Resolve every relative time ("tomorrow", "next week", "end of day") against it, and always write ISO 8601 datetimes with an offset when calling tools.
 
