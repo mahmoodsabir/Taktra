@@ -21,7 +21,7 @@ import {
 import { notifyTool } from './tools/notify-tool';
 import { connectTelegram } from './lib/telegram';
 import { todosDueForNudge } from './lib/todos';
-import { pruneTraces } from './lib/retention.ts';
+import { pruneTraces, type TraceStore } from './lib/retention.ts';
 import { OWNER_USER_ID } from './lib/users.ts';
 
 const timezone = process.env.TIMEZONE || 'UTC';
@@ -211,7 +211,19 @@ async function pruneOldTraces(): Promise<void> {
     const store = await new DuckDBStore({
       path: process.env.DUCKDB_PATH || 'mastra.duckdb',
     }).getStore('observability');
-    const { deleted } = await pruneTraces(store as never, { olderThanDays: TRACE_RETENTION_DAYS });
+    if (!store) return;
+
+    /**
+     * Checked structurally rather than cast away. `TraceStore` names only the two methods
+     * used here, so if a Mastra upgrade renames or reshapes either, this fails the
+     * typecheck — which CI runs — instead of silently doing nothing at three in the
+     * morning and letting the disk fill up again.
+     */
+    const traceStore: TraceStore = {
+      listTracesLight: (args) => store.listTracesLight(args as never) as never,
+      batchDeleteTraces: (args) => store.batchDeleteTraces(args),
+    };
+    const { deleted } = await pruneTraces(traceStore, { olderThanDays: TRACE_RETENTION_DAYS });
     if (deleted > 0) mastra.getLogger().info('Pruned old traces', { deleted });
   } catch (error) {
     mastra.getLogger().warn('Could not prune old traces', { error });

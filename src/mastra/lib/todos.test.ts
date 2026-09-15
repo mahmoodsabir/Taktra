@@ -208,3 +208,79 @@ test('the nudge sweep only ever gathers one account at a time', async () => {
   const forB = await todosDueForNudge(15, 'sweep-b');
   assert.deepEqual(forB.map((t) => t.title), ['b-overdue']);
 });
+
+test('the struggle is recorded, not just the outcome', async () => {
+  // This is the whole point: "done" tells you nothing about habits. The path does.
+  const { todoHistory } = await import('./todos.ts');
+
+  const t = await addTodo({
+    userId: 'hist',
+    title: 'write-the-proposal',
+    area: 'work',
+    dueAt: '2026-10-01T09:00:00Z',
+  });
+  await updateTodo(t.id, { status: 'stalled', statusReason: 'avoiding it' });
+  await updateTodo(t.id, { dueAt: '2026-10-08T09:00:00Z' });
+  await updateTodo(t.id, { markNudged: true });
+  await updateTodo(t.id, { status: 'done' });
+
+  const kinds = (await todoHistory(t.id)).map((e) => e.kind);
+  assert.deepEqual(kinds, ['created', 'status_changed', 'rescheduled', 'nudged', 'status_changed']);
+
+  const statusChanges = (await todoHistory(t.id)).filter((e) => e.kind === 'status_changed');
+  assert.deepEqual(
+    statusChanges.map((e) => [e.fromValue, e.toValue]),
+    [['open', 'stalled'], ['stalled', 'done']],
+    'each transition keeps where it came from',
+  );
+});
+
+test('history is append-only — later changes never rewrite earlier facts', async () => {
+  const { todoHistory } = await import('./todos.ts');
+
+  const t = await addTodo({ userId: 'append', title: 'immutable', area: 'work' });
+  await updateTodo(t.id, { status: 'stalled' });
+  const afterTwo = await todoHistory(t.id);
+
+  await updateTodo(t.id, { status: 'done' });
+  const afterThree = await todoHistory(t.id);
+
+  assert.equal(afterThree.length, afterTwo.length + 1, 'only grows');
+  assert.deepEqual(
+    afterThree.slice(0, afterTwo.length).map((e) => [e.id, e.kind, e.fromValue, e.toValue]),
+    afterTwo.map((e) => [e.id, e.kind, e.fromValue, e.toValue]),
+    'earlier rows are untouched',
+  );
+});
+
+test('a recurring commitment leaves a trace each time it comes round', async () => {
+  // It reopens rather than closing, so without an explicit event a completed occurrence
+  // would look like nothing happened at all.
+  const { todoHistory } = await import('./todos.ts');
+
+  const t = await addTodo({
+    userId: 'recur',
+    title: 'weekly-review',
+    area: 'work',
+    recurrence: 'weekly',
+    dueAt: new Date(Date.now() - 60_000).toISOString(),
+  });
+  await updateTodo(t.id, { status: 'done' });
+
+  const kinds = (await todoHistory(t.id)).map((e) => e.kind);
+  assert.ok(kinds.includes('recurrence_rolled'), `expected a roll event, got ${kinds.join(', ')}`);
+});
+
+test('events are scoped per account and queryable by window', async () => {
+  const { listEvents } = await import('./todos.ts');
+
+  await addTodo({ userId: 'ev-a', title: 'a-task', area: 'work' });
+  await addTodo({ userId: 'ev-b', title: 'b-task', area: 'work' });
+
+  const forA = await listEvents({ userId: 'ev-a' });
+  assert.ok(forA.length >= 1);
+  assert.ok(forA.every((e) => e.userId === 'ev-a'), 'no cross-account leakage into analytics');
+
+  const future = await listEvents({ userId: 'ev-a', since: '2099-01-01T00:00:00Z' });
+  assert.deepEqual(future, [], 'the window is honoured');
+});

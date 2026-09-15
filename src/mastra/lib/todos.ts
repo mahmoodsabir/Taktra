@@ -24,6 +24,37 @@ export type TodoArea = 'personal' | 'work' | 'health' | 'family' | 'growth' | 'a
  * once the task was closed.
  */
 export type TodoRecurrence = 'daily' | 'weekly' | 'monthly';
+
+/**
+ * What happened to a commitment, as it happened.
+ *
+ * `todos` holds current state, so every transition used to be overwritten: a task that
+ * went open, stalled, rescheduled twice and was finally finished read simply as "done".
+ * The struggle is the part that reveals a habit, and it was the part being thrown away.
+ *
+ * This log is append-only and never deleted. Rollups and narrative summaries are derived
+ * from it and can be recomputed when their definitions change; the log itself cannot be
+ * recreated, so it is the one thing that must not be lossy.
+ */
+export type TodoEventKind =
+  | 'created'
+  | 'status_changed'
+  | 'rescheduled'
+  | 'snoozed'
+  | 'nudged'
+  | 'recurrence_rolled'
+  | 'edited';
+
+export interface TodoEvent {
+  id: number;
+  todoId: number;
+  userId: string;
+  kind: TodoEventKind;
+  /** Previous value, where the change has one worth keeping. */
+  fromValue: string | null;
+  toValue: string | null;
+  occurredAt: string;
+}
 export type TodoPriority = 'low' | 'normal' | 'high';
 
 export interface Todo {
@@ -96,6 +127,26 @@ async function init(): Promise<void> {
 
       await db()
         .execute('CREATE INDEX IF NOT EXISTS idx_todos_user ON todos (user_id, status)')
+        .catch(() => undefined);
+
+      await db()
+        .execute(`
+          CREATE TABLE IF NOT EXISTS todo_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            todo_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            from_value TEXT,
+            to_value TEXT,
+            occurred_at TEXT NOT NULL
+          )
+        `)
+        .catch(() => undefined);
+      await db()
+        .execute('CREATE INDEX IF NOT EXISTS idx_todo_events_user ON todo_events (user_id, occurred_at)')
+        .catch(() => undefined);
+      await db()
+        .execute('CREATE INDEX IF NOT EXISTS idx_todo_events_todo ON todo_events (todo_id, id)')
         .catch(() => undefined);
 
       // Legacy rows used `context` for the life area, which collided with both
@@ -209,6 +260,88 @@ export function computeEscalationLevel(
   return Math.min(level, 4);
 }
 
+/**
+ * Append one fact to the history of a commitment.
+ *
+ * Never updates or deletes: a record of what happened is only worth having if it cannot be
+ * quietly rewritten. Failures are swallowed, because losing an audit row is a smaller harm
+ * than failing the operation the owner actually asked for.
+ */
+async function recordEvent(
+  todoId: number,
+  userId: string,
+  kind: TodoEventKind,
+  fromValue?: string | null,
+  toValue?: string | null,
+): Promise<void> {
+  try {
+    await db().execute({
+      sql: `INSERT INTO todo_events (todo_id, user_id, kind, from_value, to_value, occurred_at)
+            VALUES (?, ?, ?, ?, ?, ?)`,
+      args: [todoId, userId, kind, fromValue ?? null, toValue ?? null, new Date().toISOString()],
+    });
+  } catch {
+    // Intentionally silent — see above.
+  }
+}
+
+/** The full history of one commitment, oldest first. */
+export async function todoHistory(todoId: number): Promise<TodoEvent[]> {
+  await init();
+  const result = await db().execute({
+    sql: 'SELECT * FROM todo_events WHERE todo_id = ? ORDER BY id ASC',
+    args: [todoId],
+  });
+  return result.rows.map(toEvent);
+}
+
+/**
+ * Everything that happened to one account's commitments in a window.
+ *
+ * The raw input to rollups and monthly summaries. Aggregate this in SQL before it goes
+ * anywhere near a model: a year of events is hundreds of thousands of tokens, while the
+ * numbers derived from them are a few hundred.
+ */
+export async function listEvents(filter: {
+  userId?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+} = {}): Promise<TodoEvent[]> {
+  await init();
+  const where = ['user_id = ?'];
+  const args: unknown[] = [filter.userId ?? OWNER_USER_ID];
+
+  if (filter.since) {
+    where.push('occurred_at >= ?');
+    args.push(toUtc(filter.since));
+  }
+  if (filter.until) {
+    where.push('occurred_at < ?');
+    args.push(toUtc(filter.until));
+  }
+  args.push(filter.limit ?? 1000);
+
+  const result = await db().execute({
+    sql: `SELECT * FROM todo_events WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT ?`,
+    args: args as never[],
+  });
+  return result.rows.map(toEvent);
+}
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+function toEvent(row: any): TodoEvent {
+  return {
+    id: Number(row.id),
+    todoId: Number(row.todo_id),
+    userId: String(row.user_id),
+    kind: row.kind as TodoEventKind,
+    fromValue: row.from_value ?? null,
+    toValue: row.to_value ?? null,
+    occurredAt: String(row.occurred_at),
+  };
+}
+
 export async function addTodo(input: {
   /** Defaults to the single owner until sign-up exists. */
   userId?: string;
@@ -236,7 +369,9 @@ export async function addTodo(input: {
       new Date().toISOString(),
     ],
   });
-  return toTodo(result.rows[0]);
+  const created = toTodo(result.rows[0]);
+  await recordEvent(created.id, created.userId, 'created', null, created.status);
+  return created;
 }
 
 export async function listTodos(filter: {
@@ -386,12 +521,56 @@ export async function updateTodo(
 
   if (sets.length === 0) return getTodo(id);
 
+  // Read before writing, so the history records what actually changed rather than only
+  // where the commitment ended up. "Done" tells you nothing; "stalled for nine days, then
+  // rescheduled twice, then done" is the part worth keeping.
+  const before = await getTodo(id);
+
   args.push(id);
   const result = await db().execute({
     sql: `UPDATE todos SET ${sets.join(', ')} WHERE id = ? RETURNING *`,
     args: args as never[],
   });
-  return result.rows[0] ? toTodo(result.rows[0]) : null;
+  const after = result.rows[0] ? toTodo(result.rows[0]) : null;
+  if (!after) return null;
+
+  if (before) await recordTransitions(before, after, patch);
+  return after;
+}
+
+/**
+ * Turn one update into the facts it represents.
+ *
+ * A single call can change several things at once, and each is recorded separately so a
+ * rollup can count reschedules without also counting the status change that came with it.
+ */
+async function recordTransitions(
+  before: Todo,
+  after: Todo,
+  patch: { markNudged?: boolean },
+): Promise<void> {
+  const log = (kind: TodoEventKind, from?: string | null, to?: string | null) =>
+    recordEvent(after.id, after.userId, kind, from, to);
+
+  if (patch.markNudged) await log('nudged', null, after.dueAt);
+
+  if (before.status !== after.status) {
+    await log('status_changed', before.status, after.status);
+  } else if (before.status === 'open' && after.status === 'open' && before.dueAt !== after.dueAt && after.recurrence) {
+    // A recurring commitment completing looks like "open -> open" with a new due date.
+    // Without this it would leave no trace of having been finished at all.
+    await log('recurrence_rolled', before.dueAt, after.dueAt);
+  }
+
+  if (before.dueAt !== after.dueAt && !(before.status === after.status && after.recurrence)) {
+    await log('rescheduled', before.dueAt, after.dueAt);
+  }
+  if (before.snoozedUntil !== after.snoozedUntil) {
+    await log('snoozed', before.snoozedUntil, after.snoozedUntil);
+  }
+  if (before.title !== after.title || before.area !== after.area || before.priority !== after.priority) {
+    await log('edited', before.title, after.title);
+  }
 }
 
 export async function getTodo(id: number): Promise<Todo | null> {
