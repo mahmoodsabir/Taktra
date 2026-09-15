@@ -21,6 +21,7 @@ import {
 import { notifyTool } from './tools/notify-tool';
 import { connectTelegram } from './lib/telegram';
 import { todosDueForNudge } from './lib/todos';
+import { pruneTraces } from './lib/retention.ts';
 
 const timezone = process.env.TIMEZONE || 'UTC';
 const DUE_SWEEP_ID = 'due-sweep';
@@ -185,6 +186,31 @@ for (const stale of await mastra.schedules.list({ agentId: 'agent' })) {
     });
   });
 }
+
+/**
+ * Traces are exhaust and nothing deleted them: a single user produced roughly 290MB in a
+ * fortnight, about a hundred times the size of everything the product actually knows. Left
+ * alone it fills the disk long before the real database becomes a problem.
+ *
+ * Runs at boot and daily, never awaited, and failures are logged rather than raised —
+ * housekeeping must not keep the agent from starting.
+ */
+const TRACE_RETENTION_DAYS = Number(process.env.TRACE_RETENTION_DAYS || 14);
+
+async function pruneOldTraces(): Promise<void> {
+  try {
+    const store = await new DuckDBStore({
+      path: process.env.DUCKDB_PATH || 'mastra.duckdb',
+    }).getStore('observability');
+    const { deleted } = await pruneTraces(store as never, { olderThanDays: TRACE_RETENTION_DAYS });
+    if (deleted > 0) mastra.getLogger().info('Pruned old traces', { deleted });
+  } catch (error) {
+    mastra.getLogger().warn('Could not prune old traces', { error });
+  }
+}
+
+void pruneOldTraces();
+setInterval(() => void pruneOldTraces(), 24 * 60 * 60 * 1000).unref();
 
 const stored = await mastra.schedules.list({ agentId: NUDGER_ID });
 

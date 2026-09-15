@@ -1,4 +1,5 @@
 import { createClient, type Client } from '@libsql/client';
+import { OWNER_USER_ID } from './users.ts';
 
 /**
  * `blocked` and `stalled` are deliberately separate.
@@ -27,6 +28,8 @@ export type TodoPriority = 'low' | 'normal' | 'high';
 
 export interface Todo {
   id: number;
+  /** The account this commitment belongs to. */
+  userId: string;
   title: string;
   notes: string | null;
   area: TodoArea;
@@ -72,6 +75,7 @@ async function init(): Promise<void> {
         minimum_viable_action TEXT,
         escalation_level INTEGER NOT NULL DEFAULT 0,
         recurrence TEXT,
+        user_id TEXT NOT NULL DEFAULT 'owner',
         created_at TEXT NOT NULL,
         completed_at TEXT
       )
@@ -90,6 +94,10 @@ async function init(): Promise<void> {
         `)
         .catch(() => undefined);
 
+      await db()
+        .execute('CREATE INDEX IF NOT EXISTS idx_todos_user ON todos (user_id, status)')
+        .catch(() => undefined);
+
       // Legacy rows used `context` for the life area, which collided with both
       // "bounded context" and "context window". Renaming is a no-op once applied.
       await db().execute('ALTER TABLE todos RENAME COLUMN context TO area').catch(() => undefined);
@@ -101,11 +109,17 @@ async function init(): Promise<void> {
         'minimum_viable_action',
         'escalation_level',
         'recurrence',
+        'user_id',
       ];
       for (const column of columnsToAdd) {
-        await db()
-          .execute(`ALTER TABLE todos ADD COLUMN ${column} ${column === 'escalation_level' ? 'INTEGER NOT NULL DEFAULT 0' : 'TEXT'}`)
-          .catch(() => undefined);
+        const type =
+          column === 'escalation_level'
+            ? 'INTEGER NOT NULL DEFAULT 0'
+            : column === 'user_id'
+              ? // Existing rows predate accounts and all belong to the single owner.
+                `TEXT NOT NULL DEFAULT '${OWNER_USER_ID}'`
+              : 'TEXT';
+        await db().execute(`ALTER TABLE todos ADD COLUMN ${column} ${type}`).catch(() => undefined);
       }
     });
   return ready;
@@ -115,6 +129,7 @@ async function init(): Promise<void> {
 function toTodo(row: any): Todo {
   return {
     id: Number(row.id),
+    userId: String(row.user_id ?? OWNER_USER_ID),
     title: String(row.title),
     notes: row.notes ?? null,
     area: row.area,
@@ -195,6 +210,8 @@ export function computeEscalationLevel(
 }
 
 export async function addTodo(input: {
+  /** Defaults to the single owner until sign-up exists. */
+  userId?: string;
   title: string;
   notes?: string;
   area?: TodoArea;
@@ -205,9 +222,10 @@ export async function addTodo(input: {
 }): Promise<Todo> {
   await init();
   const result = await db().execute({
-    sql: `INSERT INTO todos (title, notes, area, priority, status, due_at, minimum_viable_action, recurrence, created_at)
-          VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?) RETURNING *`,
+    sql: `INSERT INTO todos (user_id, title, notes, area, priority, status, due_at, minimum_viable_action, recurrence, created_at)
+          VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?) RETURNING *`,
     args: [
+      input.userId ?? OWNER_USER_ID,
       input.title,
       input.notes ?? null,
       input.area ?? 'personal',
@@ -222,6 +240,8 @@ export async function addTodo(input: {
 }
 
 export async function listTodos(filter: {
+  /** Defaults to the single owner. Every read is scoped: one user must never see another's. */
+  userId?: string;
   status?: TodoStatus;
   area?: TodoArea;
   dueBefore?: string;
@@ -231,6 +251,9 @@ export async function listTodos(filter: {
   await init();
   const where: string[] = [];
   const args: unknown[] = [];
+
+  where.push('user_id = ?');
+  args.push(filter.userId ?? OWNER_USER_ID);
 
   where.push('status = ?');
   args.push(filter.status ?? 'open');
@@ -402,13 +425,14 @@ export const NUDGE_COOLDOWN_HOURS = {
  *
  * `note` is absent from the status list by design: a note is a fact, not a commitment.
  */
-export async function todosDueForNudge(withinMinutes = 15): Promise<Todo[]> {
+export async function todosDueForNudge(withinMinutes = 15, userId?: string): Promise<Todo[]> {
   await init();
   const now = new Date();
   const hoursAgo = (hours: number) => new Date(now.getTime() - hours * 3_600_000).toISOString();
   const result = await db().execute({
     sql: `SELECT * FROM todos
-          WHERE status IN ('open', 'blocked', 'stalled')
+          WHERE (? IS NULL OR user_id = ?)
+            AND status IN ('open', 'blocked', 'stalled')
             AND (snoozed_until IS NULL OR snoozed_until <= ?)
             AND (
               (due_at IS NOT NULL AND due_at <= ?
@@ -418,6 +442,8 @@ export async function todosDueForNudge(withinMinutes = 15): Promise<Todo[]> {
             )
           ORDER BY (due_at IS NULL), due_at ASC`,
     args: [
+      userId ?? null,
+      userId ?? null,
       now.toISOString(),
       new Date(now.getTime() + withinMinutes * 60_000).toISOString(),
       hoursAgo(NUDGE_COOLDOWN_HOURS.stalled),
@@ -434,9 +460,12 @@ export async function todosDueForNudge(withinMinutes = 15): Promise<Todo[]> {
 }
 
 /** How many commitments exist in total, used to detect a turn that captured nothing. */
-export async function countAllTodos(): Promise<number> {
+export async function countAllTodos(userId: string = OWNER_USER_ID): Promise<number> {
   await init();
-  const result = await db().execute('SELECT count(*) AS n FROM todos');
+  const result = await db().execute({
+    sql: 'SELECT count(*) AS n FROM todos WHERE user_id = ?',
+    args: [userId],
+  });
   return Number((result.rows[0] as unknown as { n: number | bigint })?.n ?? 0);
 }
 
