@@ -25,6 +25,20 @@ silence would mark a commitment as chased that nobody was told about.
 Timezone moves onto the user. The global `TIMEZONE` remains only as the default for the
 seeded owner, and anything reasoning about a user's time must read it from their account.
 
+Memory is scoped the same way. A channel resolves the sender's account and files their
+working memory and observations under it, so one person's profile is never another's. The
+owner keeps the literal `agent` resource id the installation has always used — their
+profile and observations sit under it across several Mastra-internal tables, and renaming
+it would strand all of that to gain nothing. A sender with no account falls through to the
+per-platform default, which isolates them; the allowlist should already have stopped them,
+so that is the second lock rather than the first.
+
+The scheduled check-ins remain the owner's alone, and are scoped explicitly rather than
+sweeping every account. They are one global schedule delivering to one chat, so an unscoped
+sweep would read every user's commitments out to a single person. **Sign-up must create a
+schedule per user**, bound to that user's thread and resource, rather than widening this
+one. That is the next structural piece.
+
 `OWNER_USER_ID` is still the default for writes that have no user in hand. Those are the
 call sites that sign-up has to revisit; they are deliberately explicit rather than implicit
 so they can be found.

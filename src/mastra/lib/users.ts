@@ -53,6 +53,18 @@ function db(): Client {
 /** The single owner of a pre-multi-user installation. */
 export const OWNER_USER_ID = 'owner';
 
+/**
+ * The memory resource a user's working memory and observations live under.
+ *
+ * The owner keeps the literal `agent` id the installation has always used. Their profile
+ * and months of observations are filed under it across several Mastra-internal tables, and
+ * renaming it would strand all of that to gain nothing — the point of this function is
+ * that every *other* user gets their own.
+ */
+export function resourceForUser(userId: string): string {
+  return userId === OWNER_USER_ID ? 'agent' : `user:${userId}`;
+}
+
 async function init(): Promise<void> {
   ready ??= (async () => {
     await db().execute(`

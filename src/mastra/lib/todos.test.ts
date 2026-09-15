@@ -181,3 +181,30 @@ test('a non-recurring task still closes normally', async () => {
   assert.equal(after?.status, 'done');
   assert.ok(after?.completedAt);
 });
+
+test('one account never sees another account\'s commitments', async () => {
+  // The whole point of user_id: without scoping, a second user's tasks land in the
+  // first user's list, and the nudge sweep reads them out to the wrong person.
+  const mine = await addTodo({ userId: 'user-a', title: 'a-private-task', area: 'work' });
+  await addTodo({ userId: 'user-b', title: 'b-private-task', area: 'work' });
+
+  const aList = await listTodos({ userId: 'user-a' });
+  assert.deepEqual(aList.map((t) => t.title), ['a-private-task']);
+
+  const bList = await listTodos({ userId: 'user-b' });
+  assert.deepEqual(bList.map((t) => t.title), ['b-private-task']);
+
+  assert.equal(mine.userId, 'user-a', 'a commitment records who it belongs to');
+});
+
+test('the nudge sweep only ever gathers one account at a time', async () => {
+  const overdue = () => new Date(Date.now() - 60_000).toISOString();
+  await addTodo({ userId: 'sweep-a', title: 'a-overdue', area: 'work', dueAt: overdue() });
+  await addTodo({ userId: 'sweep-b', title: 'b-overdue', area: 'work', dueAt: overdue() });
+
+  const forA = await todosDueForNudge(15, 'sweep-a');
+  assert.deepEqual(forA.map((t) => t.title), ['a-overdue'], "b's commitments must not appear");
+
+  const forB = await todosDueForNudge(15, 'sweep-b');
+  assert.deepEqual(forB.map((t) => t.title), ['b-overdue']);
+});

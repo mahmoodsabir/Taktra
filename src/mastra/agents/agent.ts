@@ -12,6 +12,7 @@ import {
 import { notifyTool } from '../tools/notify-tool';
 import { looksLikeCommitment } from '../lib/capture-audit';
 import { countAllTodos, recordCaptureMiss } from '../lib/todos';
+import { findUserByChannel, OWNER_USER_ID, resourceForUser, type ChannelKind } from '../lib/users.ts';
 
 const timezone = process.env.TIMEZONE || 'UTC';
 
@@ -23,9 +24,7 @@ const agentModel = process.env.AGENT_MODEL || 'openai/gpt-5.6-terra';
 const memoryModel = process.env.MEMORY_MODEL || 'openai/gpt-5.6-luna';
 
 /** The owner's own memory: Telegram, and scheduled runs acting on their behalf. */
-export const OWNER_RESOURCE_ID = 'agent';
-/** Development sessions in Studio, kept out of the owner's long-term memory. */
-export const STUDIO_RESOURCE_ID = 'studio';
+export const OWNER_RESOURCE_ID = resourceForUser(OWNER_USER_ID);
 
 /**
  * One Memory instance, shared with the nudger agent.
@@ -120,22 +119,28 @@ function explainFailure(error: Error): { markdown: string } {
  * occasionally does.
  */
 async function auditCapture(
+  platform: string,
   message: unknown,
   run: () => Promise<unknown>,
 ): Promise<void> {
-  const text =
-    message && typeof message === 'object' && 'text' in message
-      ? String((message as { text?: unknown }).text ?? '')
-      : '';
+  const record = message as { text?: unknown; author?: { userId?: unknown } } | null;
+  const text = String(record?.text ?? '');
+  const externalId = String(record?.author?.userId ?? '').trim();
 
   const suspect = looksLikeCommitment(text);
-  const before = suspect ? await countAllTodos().catch(() => -1) : -1;
+  // Counted against the sender's own commitments: a total across every account would move
+  // whenever anyone else added something, and quietly stop detecting misses.
+  const userId = suspect
+    ? ((await findUserByChannel(platform as ChannelKind, externalId).catch(() => null))?.id ??
+      OWNER_USER_ID)
+    : OWNER_USER_ID;
+  const before = suspect ? await countAllTodos(userId).catch(() => -1) : -1;
 
   await run();
 
   if (!suspect || before < 0) return;
   try {
-    if ((await countAllTodos()) === before) await recordCaptureMiss(text);
+    if ((await countAllTodos(userId)) === before) await recordCaptureMiss(text);
   } catch {
     // An audit failure must never surface as a failed turn; the reply already went out.
   }
@@ -251,14 +256,25 @@ Ask a question only when the answer changes what you would do. Otherwise pick th
         : {}),
     },
     /**
-     * Channel threads default to a per-platform resourceId. Pinning every channel to
-     * one resource keeps working memory and observations in a single place.
+     * Memory belongs to an account, not to a chat.
      *
-     * Studio is deliberately excluded elsewhere (see `STUDIO_RESOURCE_ID`): development
-     * sessions were being filed as the owner's life, so build logs ended up in the
-     * long-term memory of an agent meant to remember commitments.
+     * The sender's platform id identifies a user, and their working memory and
+     * observations are filed under that account — so someone who arrives on Telegram and
+     * later moves to WhatsApp keeps one profile rather than starting again, and no two
+     * people ever share one.
+     *
+     * A sender with no account falls through to the per-platform default, which isolates
+     * them. The adapter's allowlist should already have dropped them, so this is the
+     * second lock rather than the first: an unrecognised sender must never be able to read
+     * or write the owner's memory.
      */
-    resolveResourceId: () => OWNER_RESOURCE_ID,
+    resolveResourceId: async ({ platform, message, defaultResourceId }) => {
+      const externalId = String(message?.author?.userId ?? '').trim();
+      if (!externalId) return defaultResourceId;
+
+      const user = await findUserByChannel(platform as ChannelKind, externalId).catch(() => null);
+      return user ? resourceForUser(user.id) : defaultResourceId;
+    },
     handlers: {
       /**
        * Senders are gated by the adapter, which drops anyone outside
@@ -267,10 +283,10 @@ Ask a question only when the answer changes what you would do. Otherwise pick th
        * agent talking to them.
        */
       onDirectMessage: async (thread, message, defaultHandler) => {
-        await auditCapture(message, () => defaultHandler(thread, message));
+        await auditCapture('telegram', message, () => defaultHandler(thread, message));
       },
       onSubscribedMessage: async (thread, message, defaultHandler) => {
-        await auditCapture(message, () => defaultHandler(thread, message));
+        await auditCapture('telegram', message, () => defaultHandler(thread, message));
       },
       // Group mentions are never wanted here; this agent is single-user.
       onMention: false,

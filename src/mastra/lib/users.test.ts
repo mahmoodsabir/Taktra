@@ -69,3 +69,17 @@ test('a reused phone number moves to its new owner rather than leaking history',
     'the address no longer belongs to the previous account',
   );
 });
+
+test('the owner keeps the memory resource the installation has always used', async () => {
+  const { OWNER_USER_ID: owner, resourceForUser } = await import('./users.ts');
+  // Their profile and observations are filed under 'agent' across several Mastra tables.
+  // Renaming it would strand all of that for no gain.
+  assert.equal(resourceForUser(owner), 'agent');
+});
+
+test('every other account gets its own memory resource', async () => {
+  const { resourceForUser } = await import('./users.ts');
+  assert.equal(resourceForUser('u_123'), 'user:u_123');
+  assert.notEqual(resourceForUser('u_123'), resourceForUser('u_456'));
+  assert.notEqual(resourceForUser('u_123'), resourceForUser('owner'), 'never the owner memory');
+});

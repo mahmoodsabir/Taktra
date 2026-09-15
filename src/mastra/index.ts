@@ -22,6 +22,7 @@ import { notifyTool } from './tools/notify-tool';
 import { connectTelegram } from './lib/telegram';
 import { todosDueForNudge } from './lib/todos';
 import { pruneTraces } from './lib/retention.ts';
+import { OWNER_USER_ID } from './lib/users.ts';
 
 const timezone = process.env.TIMEZONE || 'UTC';
 const DUE_SWEEP_ID = 'due-sweep';
@@ -92,7 +93,15 @@ export const mastra = new Mastra({
 
       if (!schedule.id.endsWith(DUE_SWEEP_ID)) return cheap;
 
-      const due = await todosDueForNudge();
+      /**
+       * Explicitly the owner's commitments.
+       *
+       * These check-ins are a single global schedule delivering to a single chat, so an
+       * unscoped sweep would gather every account's commitments and read them out to one
+       * person. Sign-up has to create a schedule per user, bound to their thread and
+       * resource, rather than widening this one.
+       */
+      const due = await todosDueForNudge(15, OWNER_USER_ID);
       if (due.length === 0) return null;
 
       const lines = due.map((todo) => {
